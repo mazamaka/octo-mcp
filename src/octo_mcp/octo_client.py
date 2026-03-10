@@ -5,13 +5,13 @@ This module provides async clients for interacting with Octo Browser:
 - OctoLocalClient: Local API on port 58888 (profile start/stop, browser control)
 - OctoCloudClient: Cloud API for profile search and management (requires API token)
 """
+
 import asyncio
 import os
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import httpx
-
 
 # Cloud API base URL
 OCTO_CLOUD_API_URL = "https://app.octobrowser.net/api/v2/automation"
@@ -28,7 +28,7 @@ class OctoCloudClient:
     Requires OCTO_API_TOKEN environment variable or api_token parameter.
     """
 
-    def __init__(self, api_token: Optional[str] = None):
+    def __init__(self, api_token: str | None = None):
         """
         Initialize Cloud API client.
 
@@ -37,7 +37,7 @@ class OctoCloudClient:
         """
         self.api_token = api_token or os.environ.get("OCTO_API_TOKEN")
         self.base_url = OCTO_CLOUD_API_URL
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with proper headers."""
@@ -57,9 +57,7 @@ class OctoCloudClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def _request(
-        self, method: str, endpoint: str, **kwargs
-    ) -> dict[str, Any]:
+    async def _request(self, method: str, endpoint: str, **kwargs) -> dict[str, Any]:
         """
         Execute request to Cloud API with retry on rate limit.
 
@@ -97,18 +95,25 @@ class OctoCloudClient:
                     await asyncio.sleep(delay)
                     backoff = min(backoff * 2, 15.0)
                     continue
+                if e.response.status_code == 404:
+                    raise ValueError(f"Resource not found: {endpoint}") from e
+                if e.response.status_code == 403:
+                    raise PermissionError(
+                        "Access denied. Check your OCTO_API_TOKEN permissions."
+                    ) from e
                 raise
             except httpx.RequestError as e:
-                raise ConnectionError(
-                    f"Failed to connect to Octo Cloud API: {e}"
-                ) from e
+                raise ConnectionError(f"Failed to connect to Octo Cloud API: {e}") from e
 
     async def search_profiles(
         self,
-        search: Optional[str] = None,
-        tags: Optional[list[str]] = None,
+        search: str | None = None,
+        tags: list[str] | None = None,
         page: int = 0,
         page_len: int = 100,
+        fields: str | None = None,
+        ordering: str | None = None,
+        status: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search profiles by name or tags.
@@ -118,9 +123,13 @@ class OctoCloudClient:
             tags: List of tags to filter by
             page: Page number (starting from 0)
             page_len: Results per page (must be 10, 25, 50, or 100)
+            fields: Comma-separated fields to return (default: "title,status,tags")
+            ordering: Sort order ("created", "-created", "active", "-active",
+                "title", "-title"). Prefix with "-" for descending.
+            status: Filter by profile status (numeric)
 
         Returns:
-            List of profiles with uuid, title, status, tags fields
+            List of profiles with requested fields (uuid is always included)
         """
         # Validate page_len - Octo API only accepts specific values
         if page_len not in VALID_PAGE_LENS:
@@ -130,19 +139,23 @@ class OctoCloudClient:
             "page": page,
             "page_len": page_len,
             # Note: 'uuid' is always returned automatically, don't include in fields
-            "fields": "title,status,tags",
+            "fields": fields if fields is not None else "title,status,tags",
         }
         if search:
             params["search"] = search
         if tags:
             params["search_tags"] = ",".join(tags)
+        if ordering is not None:
+            params["ordering"] = ordering
+        if status is not None:
+            params["status"] = status
 
         result = await self._request("GET", "/profiles", params=params)
         return result.get("data", [])
 
     async def find_profile_by_name(
         self, name: str, exact_match: bool = True
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Find a profile by exact or partial name match.
 
@@ -164,7 +177,7 @@ class OctoCloudClient:
         # Partial match - return first result
         return profiles[0] if profiles else None
 
-    async def get_profile_uuid_by_name(self, name: str) -> Optional[str]:
+    async def get_profile_uuid_by_name(self, name: str) -> str | None:
         """
         Get profile UUID by exact name match.
 
@@ -176,6 +189,203 @@ class OctoCloudClient:
         """
         profile = await self.find_profile_by_name(name, exact_match=True)
         return profile.get("uuid") if profile else None
+
+    # === Profile CRUD Methods ===
+
+    async def get_profile(self, uuid: str) -> dict[str, Any]:
+        """Get full profile data by UUID.
+
+        Args:
+            uuid: Profile UUID
+
+        Returns:
+            Full profile data dictionary
+        """
+        return await self._request("GET", f"/profiles/{uuid}")
+
+    async def create_profile(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new profile.
+
+        Args:
+            data: Profile configuration data
+
+        Returns:
+            Created profile data with UUID
+        """
+        return await self._request("POST", "/profiles", json=data)
+
+    async def update_profile(self, uuid: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Update profile by UUID.
+
+        Args:
+            uuid: Profile UUID
+            data: Fields to update
+
+        Returns:
+            Updated profile data
+        """
+        return await self._request("PATCH", f"/profiles/{uuid}", json=data)
+
+    async def delete_profiles(self, uuids: list[str]) -> dict[str, Any]:
+        """Delete profiles by UUIDs.
+
+        Args:
+            uuids: List of profile UUIDs to delete
+
+        Returns:
+            Deletion result
+        """
+        return await self._request("DELETE", "/profiles", json={"uuids": uuids})
+
+    async def import_cookies(self, uuid: str, cookies: list[dict[str, Any]]) -> dict[str, Any]:
+        """Import cookies into a profile.
+
+        Args:
+            uuid: Profile UUID
+            cookies: List of cookie dictionaries to import
+
+        Returns:
+            Import result
+        """
+        return await self._request("POST", f"/profiles/{uuid}/import_cookies", json=cookies)
+
+    async def transfer_profiles(self, uuids: list[str], email: str) -> dict[str, Any]:
+        """Transfer profiles to another user by email.
+
+        Args:
+            uuids: List of profile UUIDs to transfer
+            email: Target user email
+
+        Returns:
+            Transfer result
+        """
+        return await self._request(
+            "POST", "/profiles/transfer", json={"uuids": uuids, "email": email}
+        )
+
+    # === Team Extensions Methods ===
+
+    async def get_team_extensions(self) -> list[dict[str, Any]]:
+        """Get list of team extensions.
+
+        Returns:
+            List of extension dictionaries
+        """
+        result = await self._request("GET", "/teams/extensions")
+        return result.get("data", result.get("extensions", []))
+
+    async def delete_team_extensions(self, uuids: list[str]) -> dict[str, Any]:
+        """Delete team extensions by UUIDs.
+
+        Args:
+            uuids: List of extension UUIDs to delete
+
+        Returns:
+            Deletion result
+        """
+        return await self._request("DELETE", "/teams/extensions", json={"uuids": uuids})
+
+    # === Tag Methods ===
+
+    async def get_tags(self) -> list[dict[str, Any]]:
+        """Get all tags.
+
+        Returns:
+            List of tag dictionaries
+        """
+        result = await self._request("GET", "/tags")
+        return result.get("data", [])
+
+    async def create_tag(self, name: str, color: str = "#000000") -> dict[str, Any]:
+        """Create a new tag.
+
+        Args:
+            name: Tag name
+            color: Tag color in hex format (default: "#000000")
+
+        Returns:
+            Created tag data
+        """
+        return await self._request("POST", "/tags", json={"name": name, "color": color})
+
+    async def update_tag(
+        self,
+        uuid: str,
+        name: str | None = None,
+        color: str | None = None,
+    ) -> dict[str, Any]:
+        """Update tag by UUID.
+
+        Args:
+            uuid: Tag UUID
+            name: New tag name (optional)
+            color: New tag color in hex format (optional)
+
+        Returns:
+            Updated tag data
+        """
+        data: dict[str, Any] = {}
+        if name is not None:
+            data["name"] = name
+        if color is not None:
+            data["color"] = color
+        return await self._request("PATCH", f"/tags/{uuid}", json=data)
+
+    async def delete_tag(self, uuid: str) -> dict[str, Any]:
+        """Delete tag by UUID.
+
+        Args:
+            uuid: Tag UUID
+
+        Returns:
+            Deletion result
+        """
+        return await self._request("DELETE", f"/tags/{uuid}")
+
+    # === Proxy Methods ===
+
+    async def get_proxies(self) -> list[dict[str, Any]]:
+        """Get all proxies.
+
+        Returns:
+            List of proxy dictionaries
+        """
+        result = await self._request("GET", "/proxies")
+        return result.get("data", [])
+
+    async def create_proxy(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new proxy.
+
+        Args:
+            data: Proxy configuration data
+
+        Returns:
+            Created proxy data
+        """
+        return await self._request("POST", "/proxies", json=data)
+
+    async def update_proxy(self, uuid: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Update proxy by UUID.
+
+        Args:
+            uuid: Proxy UUID
+            data: Fields to update
+
+        Returns:
+            Updated proxy data
+        """
+        return await self._request("PATCH", f"/proxies/{uuid}", json=data)
+
+    async def delete_proxy(self, uuid: str) -> dict[str, Any]:
+        """Delete proxy by UUID.
+
+        Args:
+            uuid: Proxy UUID
+
+        Returns:
+            Deletion result
+        """
+        return await self._request("DELETE", f"/proxies/{uuid}")
 
 
 class OctoLocalClient:
@@ -193,8 +403,8 @@ class OctoLocalClient:
         self,
         host: str = "localhost",
         port: int = 58888,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
     ):
         """
         Initialize Local API client.
@@ -210,7 +420,7 @@ class OctoLocalClient:
         self.username = username
         self.password = password
         self.base_url = f"http://{host}:{port}/api"
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -226,9 +436,7 @@ class OctoLocalClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def _request(
-        self, method: str, endpoint: str, **kwargs
-    ) -> dict[str, Any]:
+    async def _request(self, method: str, endpoint: str, **kwargs) -> dict[str, Any]:
         """
         Execute request to Local API with retry on rate limit.
 
@@ -276,10 +484,16 @@ class OctoLocalClient:
             parsed = urlparse(data)
             if parsed.hostname in ("127.0.0.1", "localhost"):
                 netloc = f"{self.host}:{parsed.port}" if parsed.port else self.host
-                return urlunparse((
-                    parsed.scheme, netloc, parsed.path,
-                    parsed.params, parsed.query, parsed.fragment
-                ))
+                return urlunparse(
+                    (
+                        parsed.scheme,
+                        netloc,
+                        parsed.path,
+                        parsed.params,
+                        parsed.query,
+                        parsed.fragment,
+                    )
+                )
         return data
 
     # === Authentication Methods ===
@@ -296,8 +510,7 @@ class OctoLocalClient:
             Login response with user info
         """
         return await self._request(
-            "POST", "/auth/login",
-            json={"email": email, "password": password}
+            "POST", "/auth/login", json={"email": email, "password": password}
         )
 
     async def logout(self) -> dict[str, Any]:
@@ -352,7 +565,7 @@ class OctoLocalClient:
         headless: bool = False,
         debug_port: bool = True,
         timeout: int = 120,
-        flags: Optional[list[str]] = None,
+        flags: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Start an Octo Browser profile.
@@ -373,7 +586,8 @@ class OctoLocalClient:
             flags = ["--start-maximized"]
 
         return await self._request(
-            "POST", "/profiles/start",
+            "POST",
+            "/profiles/start",
             json={
                 "uuid": uuid,
                 "headless": headless,
@@ -381,7 +595,7 @@ class OctoLocalClient:
                 "timeout": timeout,
                 "flags": flags,
                 "only_local": True,
-            }
+            },
         )
 
     async def stop_profile(self, uuid: str) -> dict[str, Any]:
@@ -391,10 +605,7 @@ class OctoLocalClient:
         Args:
             uuid: Profile UUID to stop
         """
-        return await self._request(
-            "POST", "/profiles/stop",
-            json={"uuid": uuid}
-        )
+        return await self._request("POST", "/profiles/stop", json={"uuid": uuid})
 
     async def force_stop_profile(self, uuid: str) -> dict[str, Any]:
         """
@@ -405,12 +616,9 @@ class OctoLocalClient:
         Args:
             uuid: Profile UUID to force stop
         """
-        return await self._request(
-            "POST", "/profiles/force_stop",
-            json={"uuid": uuid}
-        )
+        return await self._request("POST", "/profiles/force_stop", json={"uuid": uuid})
 
-    async def get_profile_by_uuid(self, uuid: str) -> Optional[dict[str, Any]]:
+    async def get_profile_by_uuid(self, uuid: str) -> dict[str, Any] | None:
         """
         Find an active (running) profile by UUID.
 
@@ -482,9 +690,9 @@ class OctoLocalClient:
         fingerprint_os: str = "win",
         headless: bool = False,
         debug_port: bool = True,
-        proxy: Optional[dict[str, Any]] = None,
-        cookies: Optional[list[dict[str, Any]]] = None,
-        start_pages: Optional[list[str]] = None,
+        proxy: dict[str, Any] | None = None,
+        cookies: list[dict[str, Any]] | None = None,
+        start_pages: list[str] | None = None,
         timeout: int = 60,
     ) -> dict[str, Any]:
         """
@@ -507,9 +715,7 @@ class OctoLocalClient:
         """
         await self.ensure_logged_in()
 
-        profile_data: dict[str, Any] = {
-            "fingerprint": {"os": fingerprint_os}
-        }
+        profile_data: dict[str, Any] = {"fingerprint": {"os": fingerprint_os}}
 
         if proxy:
             profile_data["proxy"] = proxy
@@ -519,13 +725,14 @@ class OctoLocalClient:
             profile_data["start_pages"] = start_pages
 
         return await self._request(
-            "POST", "/profiles/one_time/start",
+            "POST",
+            "/profiles/one_time/start",
             json={
                 "profile_data": profile_data,
                 "headless": headless,
                 "debug_port": debug_port,
                 "timeout": timeout,
-            }
+            },
         )
 
     # === System Methods ===
@@ -553,7 +760,7 @@ class OctoLocalClient:
             return False
 
 
-def extract_ws_endpoint(data: dict[str, Any]) -> Optional[str]:
+def extract_ws_endpoint(data: dict[str, Any]) -> str | None:
     """
     Extract WebSocket endpoint from API response.
 
@@ -574,7 +781,7 @@ def extract_ws_endpoint(data: dict[str, Any]) -> Optional[str]:
                 return val
 
     # Recursive search
-    def search(node: Any) -> Optional[str]:
+    def search(node: Any) -> str | None:
         if isinstance(node, dict):
             for k, v in node.items():
                 if isinstance(v, str) and v.startswith(("ws://", "wss://")):

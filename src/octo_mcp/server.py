@@ -5,24 +5,23 @@ Octo Browser MCP Server.
 MCP сервер для управления Octo Browser профилями и автоматизации браузера.
 Позволяет Claude Code управлять антидетект профилями через CDP.
 """
+
 import asyncio
 import base64
 import json
 import os
-import sys
-from typing import Any, Optional
+from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
-    Tool,
-    TextContent,
     ImageContent,
+    TextContent,
+    Tool,
 )
 
-from .octo_client import OctoLocalClient, OctoCloudClient, extract_ws_endpoint
 from .browser_manager import BrowserManager
-
+from .octo_client import OctoCloudClient, OctoLocalClient, extract_ws_endpoint
 
 # Конфигурация из переменных окружения
 OCTO_HOST = os.getenv("OCTO_HOST", "localhost")
@@ -32,9 +31,9 @@ OCTO_PASSWORD = os.getenv("OCTO_PASSWORD", "")
 OCTO_API_TOKEN = os.getenv("OCTO_API_TOKEN", "")
 
 # Глобальные объекты
-octo_client: Optional[OctoLocalClient] = None
-octo_cloud_client: Optional[OctoCloudClient] = None
-browser_manager: Optional[BrowserManager] = None
+octo_client: OctoLocalClient | None = None
+octo_cloud_client: OctoCloudClient | None = None
+browser_manager: BrowserManager | None = None
 
 
 def get_octo_client() -> OctoLocalClient:
@@ -129,7 +128,6 @@ async def list_tools() -> list[Tool]:
                 "required": ["uuid"],
             },
         ),
-
         Tool(
             name="octo_start_one_time_profile",
             description="Создать и запустить одноразовый (временный) профиль Octo Browser. Профиль удаляется после остановки. Быстрее обычного профиля, подходит для скрапинга.",
@@ -207,10 +205,70 @@ async def list_tools() -> list[Tool]:
                         "description": "Максимальное количество результатов",
                         "default": 20,
                     },
+                    "ordering": {
+                        "type": "string",
+                        "description": "Сортировка: 'created', '-created', 'active', '-active', 'title', '-title'",
+                    },
+                    "status": {
+                        "type": "integer",
+                        "description": "Фильтр по статусу профиля (числовой код)",
+                    },
                 },
             },
         ),
-
+        Tool(
+            name="octo_get_profile",
+            description="Получить полные данные профиля по UUID: fingerprint, proxy, extensions, description, tags. Использует Cloud API.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uuid": {
+                        "type": "string",
+                        "description": "UUID профиля",
+                    },
+                },
+                "required": ["uuid"],
+            },
+        ),
+        Tool(
+            name="octo_get_extensions",
+            description="Получить список расширений команды. Показывает name, version, uuid каждого расширения.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="octo_delete_extensions",
+            description="Удалить расширения команды по UUID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uuids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Список UUID расширений для удаления",
+                    },
+                },
+                "required": ["uuids"],
+            },
+        ),
+        Tool(
+            name="octo_get_tags",
+            description="Получить список всех тегов. Показывает name, color, uuid каждого тега.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="octo_get_proxies",
+            description="Получить список всех прокси. Показывает type, host, port, uuid каждого прокси.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
         # === Подключение к браузеру ===
         Tool(
             name="browser_connect",
@@ -234,7 +292,6 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
-
         # === Навигация ===
         Tool(
             name="browser_navigate",
@@ -287,7 +344,6 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
-
         # === Взаимодействие ===
         Tool(
             name="browser_click",
@@ -412,7 +468,6 @@ async def list_tools() -> list[Tool]:
                 "required": ["selector", "value"],
             },
         ),
-
         # === Получение информации ===
         Tool(
             name="browser_screenshot",
@@ -520,7 +575,6 @@ async def list_tools() -> list[Tool]:
                 "required": ["selector"],
             },
         ),
-
         # === JavaScript ===
         Tool(
             name="browser_evaluate",
@@ -536,7 +590,6 @@ async def list_tools() -> list[Tool]:
                 "required": ["script"],
             },
         ),
-
         # === Вкладки ===
         Tool(
             name="browser_list_tabs",
@@ -605,11 +658,17 @@ async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | Im
         is_ok = await client.health_check()
         if is_ok:
             version = await client.get_version()
-            return [TextContent(
-                type="text",
-                text=f"Octo Browser API доступен.\nВерсия: {version.get('current', 'unknown')}"
-            )]
-        return [TextContent(type="text", text="Octo Browser API недоступен. Убедитесь что Octo Browser запущен.")]
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Octo Browser API доступен.\nВерсия: {version.get('current', 'unknown')}",
+                )
+            ]
+        return [
+            TextContent(
+                type="text", text="Octo Browser API недоступен. Убедитесь что Octo Browser запущен."
+            )
+        ]
 
     if name == "octo_list_profiles":
         profiles = await client.get_active_profiles()
@@ -632,10 +691,12 @@ async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | Im
         ws_endpoint = extract_ws_endpoint(result)
 
         status = "уже запущен" if result.get("already_running") else "запущен"
-        return [TextContent(
-            type="text",
-            text=f"Профиль {uuid} {status}.\nws_endpoint: {ws_endpoint}\n\nИспользуйте browser_connect с этим ws_endpoint для подключения."
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"Профиль {uuid} {status}.\nws_endpoint: {ws_endpoint}\n\nИспользуйте browser_connect с этим ws_endpoint для подключения.",
+            )
+        ]
 
     if name == "octo_stop_profile":
         uuid = args["uuid"]
@@ -656,10 +717,12 @@ async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | Im
         ws_endpoint = extract_ws_endpoint(result)
         uuid = result.get("uuid", "N/A")
 
-        return [TextContent(
-            type="text",
-            text=f"Одноразовый профиль создан и запущен.\nUUID: {uuid}\nws_endpoint: {ws_endpoint}\n\nИспользуйте browser_connect с этим ws_endpoint для подключения.\nПрофиль будет удалён после остановки."
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"Одноразовый профиль создан и запущен.\nUUID: {uuid}\nws_endpoint: {ws_endpoint}\n\nИспользуйте browser_connect с этим ws_endpoint для подключения.\nПрофиль будет удалён после остановки.",
+            )
+        ]
 
     if name == "octo_find_profile_by_name":
         cloud = get_octo_cloud_client()
@@ -668,10 +731,12 @@ async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | Im
         profile = await cloud.find_profile_by_name(profile_name, exact_match=exact_match)
 
         if profile:
-            return [TextContent(
-                type="text",
-                text=f"Профиль найден:\n- UUID: {profile.get('uuid')}\n- Имя: {profile.get('title')}\n- Статус: {profile.get('status', 'N/A')}\n- Теги: {profile.get('tags', [])}"
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Профиль найден:\n- UUID: {profile.get('uuid')}\n- Имя: {profile.get('title')}\n- Статус: {profile.get('status', 'N/A')}\n- Теги: {profile.get('tags', [])}",
+                )
+            ]
         return [TextContent(type="text", text=f"Профиль с именем '{profile_name}' не найден.")]
 
     if name == "octo_start_profile_by_name":
@@ -693,18 +758,28 @@ async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | Im
         ws_endpoint = extract_ws_endpoint(result)
         status = "уже запущен" if result.get("already_running") else "запущен"
 
-        return [TextContent(
-            type="text",
-            text=f"Профиль '{profile_name}' ({uuid}) {status}.\nws_endpoint: {ws_endpoint}\n\nИспользуйте browser_connect с этим ws_endpoint для подключения."
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"Профиль '{profile_name}' ({uuid}) {status}.\nws_endpoint: {ws_endpoint}\n\nИспользуйте browser_connect с этим ws_endpoint для подключения.",
+            )
+        ]
 
     if name == "octo_search_profiles":
         cloud = get_octo_cloud_client()
         search = args.get("search")
         tags = args.get("tags")
         limit = args.get("limit", 20)
+        ordering = args.get("ordering")
+        status = args.get("status")
 
-        profiles = await cloud.search_profiles(search=search, tags=tags, page_len=limit)
+        profiles = await cloud.search_profiles(
+            search=search,
+            tags=tags,
+            page_len=limit,
+            ordering=ordering,
+            status=status,
+        )
 
         if not profiles:
             return [TextContent(type="text", text="Профили не найдены.")]
@@ -714,6 +789,121 @@ async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | Im
             lines.append(f"- {p.get('title', 'N/A')} (UUID: {p.get('uuid', 'N/A')})")
             if p.get("tags"):
                 lines.append(f"  Теги: {', '.join(p['tags'])}")
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    if name == "octo_get_profile":
+        cloud = get_octo_cloud_client()
+        uuid = args["uuid"]
+        profile = await cloud.get_profile(uuid)
+
+        # Форматируем читабельно
+        lines = [f"Профиль: {profile.get('title', 'N/A')}"]
+        lines.append(f"UUID: {profile.get('uuid', uuid)}")
+        if profile.get("description"):
+            lines.append(f"Описание: {profile['description']}")
+
+        # Tags
+        tags = profile.get("tags", [])
+        if tags:
+            tag_names = [t.get("name", t) if isinstance(t, dict) else t for t in tags]
+            lines.append(f"Теги: {', '.join(tag_names)}")
+
+        # Fingerprint
+        fp = profile.get("fingerprint", {})
+        if fp:
+            lines.append("\nFingerprint:")
+            lines.append(f"  OS: {fp.get('os', 'N/A')}")
+            if fp.get("useragent"):
+                ua = fp["useragent"]
+                if isinstance(ua, dict):
+                    lines.append(f"  User-Agent: {ua.get('value', 'auto')}")
+                else:
+                    lines.append(f"  User-Agent: {ua}")
+            screen = fp.get("screen")
+            if screen:
+                if isinstance(screen, dict):
+                    lines.append(
+                        f"  Screen: {screen.get('width', '?')}x{screen.get('height', '?')}"
+                    )
+                else:
+                    lines.append(f"  Screen: {screen}")
+
+        # Proxy
+        proxy = profile.get("proxy", {})
+        if proxy and proxy.get("type"):
+            proxy_type = proxy.get("type", "N/A")
+            host = proxy.get("host", "N/A")
+            port = proxy.get("port", "N/A")
+            lines.append(f"\nProxy: {proxy_type}://{host}:{port}")
+
+        # Extensions
+        extensions = profile.get("extensions", [])
+        if extensions:
+            lines.append(f"\nРасширения ({len(extensions)}):")
+            for ext in extensions:
+                if isinstance(ext, dict):
+                    ext_name = ext.get("title", ext.get("name", "N/A"))
+                    ext_ver = ext.get("version", "")
+                    lines.append(f"  - {ext_name} {ext_ver}".strip())
+                else:
+                    lines.append(f"  - {ext}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    if name == "octo_get_extensions":
+        cloud = get_octo_cloud_client()
+        extensions = await cloud.get_team_extensions()
+
+        if not extensions:
+            return [TextContent(type="text", text="Расширения не найдены.")]
+
+        lines = [f"Расширения команды ({len(extensions)}):"]
+        for ext in extensions:
+            name_val = ext.get("title", ext.get("name", "N/A"))
+            version = ext.get("version", "N/A")
+            ext_uuid = ext.get("uuid", "N/A")
+            lines.append(f"- {name_val} v{version} (UUID: {ext_uuid})")
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    if name == "octo_delete_extensions":
+        cloud = get_octo_cloud_client()
+        uuids = args["uuids"]
+        await cloud.delete_team_extensions(uuids)
+        return [TextContent(type="text", text=f"Удалено расширений: {len(uuids)}")]
+
+    if name == "octo_get_tags":
+        cloud = get_octo_cloud_client()
+        tags = await cloud.get_tags()
+
+        if not tags:
+            return [TextContent(type="text", text="Теги не найдены.")]
+
+        lines = [f"Теги ({len(tags)}):"]
+        for tag in tags:
+            tag_name = tag.get("name", "N/A")
+            color = tag.get("color", "N/A")
+            tag_uuid = tag.get("uuid", "N/A")
+            lines.append(f"- {tag_name} (цвет: {color}, UUID: {tag_uuid})")
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    if name == "octo_get_proxies":
+        cloud = get_octo_cloud_client()
+        proxies = await cloud.get_proxies()
+
+        if not proxies:
+            return [TextContent(type="text", text="Прокси не найдены.")]
+
+        lines = [f"Прокси ({len(proxies)}):"]
+        for p in proxies:
+            proxy_type = p.get("type", "N/A")
+            host = p.get("host", "N/A")
+            port = p.get("port", "N/A")
+            proxy_uuid = p.get("uuid", "N/A")
+            title = p.get("title", "")
+            display = f"{proxy_type}://{host}:{port}"
+            if title:
+                display = f"{title} ({display})"
+            lines.append(f"- {display} (UUID: {proxy_uuid})")
         return [TextContent(type="text", text="\n".join(lines))]
 
     # === Подключение к браузеру ===
@@ -847,7 +1037,11 @@ async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | Im
         result = await manager.evaluate(script)
         if result is None:
             return [TextContent(type="text", text="Выполнено (результат: null)")]
-        return [TextContent(type="text", text=f"Результат: {json.dumps(result, ensure_ascii=False, indent=2)}")]
+        return [
+            TextContent(
+                type="text", text=f"Результат: {json.dumps(result, ensure_ascii=False, indent=2)}"
+            )
+        ]
 
     # === Вкладки ===
 
