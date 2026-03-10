@@ -67,15 +67,15 @@ claude mcp add octo-mcp -- python -m octo_mcp.server
 
 # With authentication (recommended)
 claude mcp add octo-mcp \
-  -e OCTO_USERNAME="your@email.com" \
-  -e OCTO_PASSWORD="your_password" \
+  -e OCTO_USERNAME="<your_email>" \
+  -e OCTO_PASSWORD="<your_password>" \
   -- python -m octo_mcp.server
 
 # Full setup with Cloud API (enables search by profile name)
 claude mcp add octo-mcp \
-  -e OCTO_USERNAME="your@email.com" \
-  -e OCTO_PASSWORD="your_password" \
-  -e OCTO_API_TOKEN="your_api_token" \
+  -e OCTO_USERNAME="<your_email>" \
+  -e OCTO_PASSWORD="<your_password>" \
+  -e OCTO_API_TOKEN="<your_api_token>" \
   -- python -m octo_mcp.server
 ```
 
@@ -186,9 +186,9 @@ If Octo Browser runs on a different host (e.g., in Docker), set the `OCTO_HOST` 
 
 ```bash
 claude mcp add octo-mcp \
-  -e OCTO_HOST="192.168.1.100" \
-  -e OCTO_USERNAME="your@email.com" \
-  -e OCTO_PASSWORD="your_password" \
+  -e OCTO_HOST="<remote_host_ip>" \
+  -e OCTO_USERNAME="<your_email>" \
+  -e OCTO_PASSWORD="<your_password>" \
   -- python -m octo_mcp.server
 ```
 
