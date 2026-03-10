@@ -1071,13 +1071,13 @@ async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | Im
     return [TextContent(type="text", text=f"Неизвестный инструмент: {name}")]
 
 
-async def run_server():
+async def run_server() -> None:
     """Запустить MCP сервер."""
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
-def main():
+def main() -> None:
     """Точка входа."""
     asyncio.run(run_server())
 

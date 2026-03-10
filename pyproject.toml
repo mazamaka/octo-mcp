@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "octo-mcp"
 version = "0.1.0"
-description = "MCP server for Octo Browser - control antidetect browser profiles with AI"
+description = "MCP server for Octo Browser — control antidetect browser profiles with AI"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    { name = "Max", email = "mazamaka321@gmail.com" }
+    { name = "Maksym Babenko", email = "mazamaka321@gmail.com" }
 ]
 keywords = [
     "mcp",
@@ -18,8 +18,11 @@ keywords = [
     "antidetect",
     "browser-automation",
     "playwright",
+    "cdp",
     "claude",
-    "ai",
+    "ai-tooling",
+    "multi-accounting",
+    "fingerprint",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,8 +33,10 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Typing :: Typed",
 ]
 dependencies = [
     "mcp>=1.0.0",
@@ -44,12 +49,13 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
+    "mypy>=1.0.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/anthropics/octo-mcp"
-Repository = "https://github.com/anthropics/octo-mcp"
-Issues = "https://github.com/anthropics/octo-mcp/issues"
+Homepage = "https://github.com/mazamaka/octo-mcp"
+Repository = "https://github.com/mazamaka/octo-mcp"
+Issues = "https://github.com/mazamaka/octo-mcp/issues"
 
 [project.scripts]
 octo-mcp = "octo_mcp.server:main"
@@ -63,21 +69,35 @@ line-length = 100
 
 [tool.ruff.lint]
 select = [
-    "E",  # pycodestyle errors
-    "W",  # pycodestyle warnings
-    "F",  # pyflakes
-    "I",  # isort
-    "B",  # flake8-bugbear
-    "C4", # flake8-comprehensions
-    "UP", # pyupgrade
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ANN", # flake8-annotations
+    "S",   # flake8-bandit (security)
+    "T20", # flake8-print
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
-    "B008",  # do not perform function calls in argument defaults
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+"ANN401", # Dynamically typed expressions (typing.Any) are disallowed
+    "S101",   # use of assert
 ]
 
 [tool.ruff.lint.isort]
 known-first-party = ["octo_mcp"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "ANN"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,40 +1,61 @@
 """
-Browser Manager - управление браузером через Playwright CDP.
-Подключается к Octo Browser профилю через WebSocket endpoint.
-"""
-import asyncio
-from typing import Any, Optional, Literal
+Browser Manager -- Playwright CDP integration for Octo Browser.
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
+Connects to Octo Browser profiles via Chrome DevTools Protocol (CDP)
+and provides a high-level API for page interaction, navigation,
+screenshot capture, and JavaScript execution.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
 
 class BrowserManager:
-    """Менеджер для управления браузером через Playwright CDP."""
+    """Manages browser connection and interaction through Playwright CDP.
 
-    def __init__(self):
-        self._playwright: Optional[Playwright] = None
-        self._browser: Optional[Browser] = None
-        self._context: Optional[BrowserContext] = None
-        self._page: Optional[Page] = None
-        self._ws_endpoint: Optional[str] = None
+    Connects to an Octo Browser profile via its WebSocket debug endpoint
+    and exposes methods for navigation, clicking, typing, screenshots, etc.
+
+    Usage:
+        manager = BrowserManager()
+        await manager.connect("ws://localhost:12345/devtools/browser/abc")
+        await manager.navigate("https://example.com")
+        screenshot = await manager.screenshot()
+        await manager.disconnect()
+    """
+
+    def __init__(self) -> None:
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
+        self._page: Page | None = None
+        self._ws_endpoint: str | None = None
 
     @property
     def is_connected(self) -> bool:
-        """Проверить подключён ли браузер."""
+        """Check if browser is connected via CDP."""
         return self._browser is not None and self._browser.is_connected()
 
-    async def _ensure_connected(self):
-        """Убедиться что браузер подключён."""
+    async def _ensure_connected(self) -> None:
+        """Raise if browser is not connected."""
         if not self.is_connected:
-            raise ConnectionError(
-                "Браузер не подключён. Используйте browser_connect для подключения."
-            )
+            raise ConnectionError("Browser not connected. Use browser_connect first.")
 
     async def _get_page(self) -> Page:
-        """Получить текущую страницу."""
+        """Get the current active page, creating one if needed."""
         await self._ensure_connected()
+        assert self._browser is not None
+
         if self._page is None or self._page.is_closed():
-            # Получаем первый контекст и страницу
             contexts = self._browser.contexts
             if contexts:
                 self._context = contexts[0]
@@ -44,30 +65,26 @@ class BrowserManager:
                 else:
                     self._page = await self._context.new_page()
             else:
-                # Создаём новый контекст
                 self._context = await self._browser.new_context()
                 self._page = await self._context.new_page()
         return self._page
 
-    async def connect(self, ws_endpoint: str):
-        """
-        Подключиться к браузеру через CDP WebSocket.
+    # === Connection ===
+
+    async def connect(self, ws_endpoint: str) -> None:
+        """Connect to browser via CDP WebSocket endpoint.
 
         Args:
-            ws_endpoint: WebSocket endpoint для CDP подключения
+            ws_endpoint: WebSocket URL from Octo Browser profile start response.
         """
-        # Отключаемся от предыдущего если был
         if self.is_connected:
             await self.disconnect()
 
-        # Запускаем Playwright
         self._playwright = await async_playwright().start()
-
-        # Подключаемся к браузеру через CDP
         self._browser = await self._playwright.chromium.connect_over_cdp(ws_endpoint)
         self._ws_endpoint = ws_endpoint
 
-        # Получаем существующий контекст и страницу
+        # Attach to existing context and page if available
         contexts = self._browser.contexts
         if contexts:
             self._context = contexts[0]
@@ -75,14 +92,13 @@ class BrowserManager:
             if pages:
                 self._page = pages[0]
 
-    async def disconnect(self):
-        """Отключиться от браузера (не закрывает его)."""
+    async def disconnect(self) -> None:
+        """Disconnect from browser without closing the Octo profile."""
         if self._browser:
             try:
-                # disconnect() не закрывает браузер, просто отключается
                 await self._browser.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001, S110
+                pass  # Best-effort close
             self._browser = None
             self._context = None
             self._page = None
@@ -91,44 +107,57 @@ class BrowserManager:
             await self._playwright.stop()
             self._playwright = None
 
-    # === Навигация ===
+    # === Navigation ===
 
-    async def navigate(self, url: str, wait_until: str = "domcontentloaded"):
-        """Перейти на URL."""
+    async def navigate(self, url: str, wait_until: str = "domcontentloaded") -> None:
+        """Navigate to a URL.
+
+        Args:
+            url: Target URL.
+            wait_until: Wait strategy -- 'load', 'domcontentloaded', or 'networkidle'.
+        """
         page = await self._get_page()
         await page.goto(url, wait_until=wait_until)
 
     async def get_url(self) -> str:
-        """Получить текущий URL."""
+        """Get the current page URL."""
         page = await self._get_page()
         return page.url
 
-    async def go_back(self):
-        """Вернуться назад."""
+    async def go_back(self) -> None:
+        """Navigate back in browser history."""
         page = await self._get_page()
         await page.go_back()
 
-    async def go_forward(self):
-        """Перейти вперёд."""
+    async def go_forward(self) -> None:
+        """Navigate forward in browser history."""
         page = await self._get_page()
         await page.go_forward()
 
-    async def reload(self):
-        """Перезагрузить страницу."""
+    async def reload(self) -> None:
+        """Reload the current page."""
         page = await self._get_page()
         await page.reload()
 
-    # === Взаимодействие ===
+    # === Interaction ===
 
     async def click(
         self,
-        selector: Optional[str] = None,
-        x: Optional[float] = None,
-        y: Optional[float] = None,
+        selector: str | None = None,
+        x: float | None = None,
+        y: float | None = None,
         button: Literal["left", "right", "middle"] = "left",
         click_count: int = 1,
-    ):
-        """Кликнуть по элементу или координатам."""
+    ) -> None:
+        """Click on an element or coordinates.
+
+        Args:
+            selector: CSS selector for the target element.
+            x: X coordinate for positional click.
+            y: Y coordinate for positional click.
+            button: Mouse button -- 'left', 'right', or 'middle'.
+            click_count: Number of clicks (2 for double-click).
+        """
         page = await self._get_page()
 
         if selector:
@@ -136,15 +165,24 @@ class BrowserManager:
         elif x is not None and y is not None:
             await page.mouse.click(x, y, button=button, click_count=click_count)
         else:
-            raise ValueError("Укажите selector или координаты (x, y)")
+            raise ValueError("Provide either selector or (x, y) coordinates")
 
     async def type_text(
         self,
         text: str,
-        selector: Optional[str] = None,
+        selector: str | None = None,
         delay: float = 50,
-    ):
-        """Ввести текст."""
+    ) -> None:
+        """Type text into an element or the page.
+
+        When selector is provided, uses `fill()` for instant input.
+        Without selector, simulates keystroke-by-keystroke typing.
+
+        Args:
+            text: Text to type.
+            selector: CSS selector of the input element.
+            delay: Delay between keystrokes in milliseconds (no-selector mode).
+        """
         page = await self._get_page()
 
         if selector:
@@ -152,8 +190,12 @@ class BrowserManager:
         else:
             await page.keyboard.type(text, delay=delay)
 
-    async def press_key(self, key: str):
-        """Нажать клавишу."""
+    async def press_key(self, key: str) -> None:
+        """Press a keyboard key.
+
+        Args:
+            key: Key name -- 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', etc.
+        """
         page = await self._get_page()
         await page.keyboard.press(key)
 
@@ -161,9 +203,15 @@ class BrowserManager:
         self,
         direction: str = "down",
         amount: int = 300,
-        selector: Optional[str] = None,
-    ):
-        """Прокрутить страницу."""
+        selector: str | None = None,
+    ) -> None:
+        """Scroll the page or a specific element.
+
+        Args:
+            direction: Scroll direction -- 'up', 'down', 'left', 'right'.
+            amount: Number of pixels to scroll.
+            selector: CSS selector of the element to scroll (scrolls page if omitted).
+        """
         page = await self._get_page()
 
         delta_x = 0
@@ -188,48 +236,80 @@ class BrowserManager:
         else:
             await page.mouse.wheel(delta_x, delta_y)
 
-    async def hover(self, selector: str):
-        """Навести курсор на элемент."""
+    async def hover(self, selector: str) -> None:
+        """Hover over an element.
+
+        Args:
+            selector: CSS selector of the target element.
+        """
         page = await self._get_page()
         await page.hover(selector)
 
-    async def select_option(self, selector: str, value: str):
-        """Выбрать опцию в select."""
+    async def select_option(self, selector: str, value: str) -> None:
+        """Select an option in a dropdown.
+
+        Args:
+            selector: CSS selector of the <select> element.
+            value: Value of the option to select.
+        """
         page = await self._get_page()
         await page.select_option(selector, value)
 
-    # === Получение информации ===
+    # === Information Extraction ===
 
     async def screenshot(
         self,
-        selector: Optional[str] = None,
+        selector: str | None = None,
         full_page: bool = False,
     ) -> bytes:
-        """Сделать скриншот."""
+        """Capture a screenshot.
+
+        Args:
+            selector: CSS selector to screenshot a specific element.
+            full_page: Capture the entire scrollable page.
+
+        Returns:
+            PNG image bytes.
+        """
         page = await self._get_page()
 
         if selector:
             element = await page.query_selector(selector)
             if element:
                 return await element.screenshot()
-            raise ValueError(f"Элемент не найден: {selector}")
+            raise ValueError(f"Element not found: {selector}")
 
         return await page.screenshot(full_page=full_page)
 
     async def get_text(self, selector: str) -> str:
-        """Получить текст элемента."""
+        """Get the text content of an element.
+
+        Args:
+            selector: CSS selector of the element.
+
+        Returns:
+            Inner text of the element.
+        """
         page = await self._get_page()
         element = await page.query_selector(selector)
         if element:
             return await element.inner_text()
-        raise ValueError(f"Элемент не найден: {selector}")
+        raise ValueError(f"Element not found: {selector}")
 
     async def get_html(
         self,
-        selector: Optional[str] = None,
+        selector: str | None = None,
         outer: bool = True,
     ) -> str:
-        """Получить HTML."""
+        """Get HTML content of the page or an element.
+
+        Args:
+            selector: CSS selector (returns full page HTML if omitted).
+            outer: Include the element's own tag (outerHTML vs innerHTML).
+
+        Returns:
+            HTML string.
+        """
         page = await self._get_page()
 
         if selector:
@@ -238,30 +318,46 @@ class BrowserManager:
                 if outer:
                     return await element.evaluate("el => el.outerHTML")
                 return await element.inner_html()
-            raise ValueError(f"Элемент не найден: {selector}")
+            raise ValueError(f"Element not found: {selector}")
 
         return await page.content()
 
-    async def get_attribute(self, selector: str, attribute: str) -> Optional[str]:
-        """Получить атрибут элемента."""
+    async def get_attribute(self, selector: str, attribute: str) -> str | None:
+        """Get an attribute value from an element.
+
+        Args:
+            selector: CSS selector of the element.
+            attribute: Attribute name to retrieve.
+
+        Returns:
+            Attribute value or None.
+        """
         page = await self._get_page()
         element = await page.query_selector(selector)
         if element:
             return await element.get_attribute(attribute)
-        raise ValueError(f"Элемент не найден: {selector}")
+        raise ValueError(f"Element not found: {selector}")
 
     async def query_selector_all(self, selector: str) -> list[dict[str, Any]]:
-        """Найти все элементы и вернуть их информацию."""
+        """Find all matching elements and return their metadata.
+
+        Args:
+            selector: CSS selector to match.
+
+        Returns:
+            List of dicts with index, tag, text, id, class, href, and bounds.
+        """
         page = await self._get_page()
         elements = await page.query_selector_all(selector)
 
-        results = []
+        results: list[dict[str, Any]] = []
         for i, el in enumerate(elements):
             try:
-                info = {
+                text = await el.inner_text()
+                info: dict[str, Any] = {
                     "index": i,
                     "tag": await el.evaluate("el => el.tagName.toLowerCase()"),
-                    "text": (await el.inner_text())[:200] if await el.inner_text() else "",
+                    "text": text[:200] if text else "",
                     "id": await el.get_attribute("id"),
                     "class": await el.get_attribute("class"),
                     "href": await el.get_attribute("href"),
@@ -270,8 +366,8 @@ class BrowserManager:
                 if box:
                     info["bounds"] = box
                 results.append(info)
-            except Exception:
-                results.append({"index": i, "error": "Не удалось получить информацию"})
+            except Exception:  # noqa: BLE001
+                results.append({"index": i, "error": "Failed to extract element info"})
 
         return results
 
@@ -280,42 +376,67 @@ class BrowserManager:
         selector: str,
         timeout: int = 30000,
         state: Literal["attached", "detached", "visible", "hidden"] = "visible",
-    ):
-        """Ждать появления элемента."""
+    ) -> None:
+        """Wait for an element to reach the specified state.
+
+        Args:
+            selector: CSS selector of the element.
+            timeout: Maximum wait time in milliseconds.
+            state: Target state -- 'attached', 'detached', 'visible', 'hidden'.
+        """
         page = await self._get_page()
         await page.wait_for_selector(selector, timeout=timeout, state=state)
 
     # === JavaScript ===
 
     async def evaluate(self, script: str) -> Any:
-        """Выполнить JavaScript."""
+        """Execute JavaScript on the page and return the result.
+
+        Args:
+            script: JavaScript code to execute.
+
+        Returns:
+            The return value of the script (JSON-serializable).
+        """
         page = await self._get_page()
         return await page.evaluate(script)
 
-    # === Вкладки ===
+    # === Tab Management ===
 
     async def list_tabs(self) -> list[dict[str, Any]]:
-        """Получить список вкладок."""
-        await self._ensure_connected()
+        """List all open tabs across all contexts.
 
-        tabs = []
+        Returns:
+            List of dicts with title, url, and active flag.
+        """
+        await self._ensure_connected()
+        assert self._browser is not None
+
+        tabs: list[dict[str, Any]] = []
         current_page = self._page
 
         for context in self._browser.contexts:
             for page in context.pages:
-                tabs.append({
-                    "title": await page.title(),
-                    "url": page.url,
-                    "active": page == current_page,
-                })
+                tabs.append(
+                    {
+                        "title": await page.title(),
+                        "url": page.url,
+                        "active": page == current_page,
+                    }
+                )
 
         return tabs
 
-    async def switch_tab(self, index: int):
-        """Переключиться на вкладку по индексу."""
-        await self._ensure_connected()
+    async def switch_tab(self, index: int) -> None:
+        """Switch to a tab by index.
 
-        all_pages = []
+        Args:
+            index: Zero-based tab index.
+        """
+        await self._ensure_connected()
+        assert self._browser is not None
+
+        all_pages: list[Page] = []
         for context in self._browser.contexts:
             all_pages.extend(context.pages)
 
@@ -323,11 +444,16 @@ class BrowserManager:
             self._page = all_pages[index]
             await self._page.bring_to_front()
         else:
-            raise ValueError(f"Вкладка с индексом {index} не найдена")
+            raise ValueError(f"Tab index {index} out of range (0-{len(all_pages) - 1})")
 
-    async def new_tab(self, url: Optional[str] = None):
-        """Открыть новую вкладку."""
+    async def new_tab(self, url: str | None = None) -> None:
+        """Open a new tab, optionally navigating to a URL.
+
+        Args:
+            url: URL to open in the new tab.
+        """
         await self._ensure_connected()
+        assert self._browser is not None
 
         if self._context is None:
             contexts = self._browser.contexts
@@ -340,8 +466,8 @@ class BrowserManager:
         if url:
             await self._page.goto(url)
 
-    async def close_tab(self):
-        """Закрыть текущую вкладку."""
+    async def close_tab(self) -> None:
+        """Close the current tab."""
         page = await self._get_page()
         await page.close()
         self._page = None

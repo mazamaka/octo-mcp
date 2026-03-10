@@ -28,7 +28,7 @@ class OctoCloudClient:
     Requires OCTO_API_TOKEN environment variable or api_token parameter.
     """
 
-    def __init__(self, api_token: str | None = None):
+    def __init__(self, api_token: str | None = None) -> None:
         """
         Initialize Cloud API client.
 
@@ -52,12 +52,12 @@ class OctoCloudClient:
             )
         return self._client
 
-    async def close(self):
+    async def close(self) -> None:
         """Close HTTP client and release resources."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def _request(self, method: str, endpoint: str, **kwargs) -> dict[str, Any]:
+    async def _request(self, method: str, endpoint: str, **kwargs: Any) -> dict[str, Any]:
         """
         Execute request to Cloud API with retry on rate limit.
 
@@ -405,7 +405,7 @@ class OctoLocalClient:
         port: int = 58888,
         username: str | None = None,
         password: str | None = None,
-    ):
+    ) -> None:
         """
         Initialize Local API client.
 
@@ -431,12 +431,12 @@ class OctoLocalClient:
             )
         return self._client
 
-    async def close(self):
+    async def close(self) -> None:
         """Close HTTP client and release resources."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def _request(self, method: str, endpoint: str, **kwargs) -> dict[str, Any]:
+    async def _request(self, method: str, endpoint: str, **kwargs: Any) -> dict[str, Any]:
         """
         Execute request to Local API with retry on rate limit.
 
@@ -534,15 +534,15 @@ class OctoLocalClient:
             user = await self.get_username()
             if user.get("username"):
                 return True
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001, S110
+            pass  # Not logged in yet
 
         if self.username and self.password:
             try:
                 await self.login(self.username, self.password)
                 return True
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001, S110
+                pass  # Login failed
         return False
 
     # === Profile Management Methods ===
@@ -679,8 +679,8 @@ class OctoLocalClient:
                         if profile:
                             profile["already_running"] = True
                             return profile
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001, S110
+                    pass  # Could not parse error response
             raise
 
     # === One-Time Profile Methods ===
@@ -783,7 +783,7 @@ def extract_ws_endpoint(data: dict[str, Any]) -> str | None:
     # Recursive search
     def search(node: Any) -> str | None:
         if isinstance(node, dict):
-            for k, v in node.items():
+            for _k, v in node.items():
                 if isinstance(v, str) and v.startswith(("ws://", "wss://")):
                     return v
                 result = search(v)
