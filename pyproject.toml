@@ -39,7 +39,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # 2.0 removed the low-level @server.list_tools()/@server.call_tool() decorators
+    # this server is built on; migrating to the MCPServer API is a separate change.
+    "mcp>=1.0.0,<2",
     "httpx>=0.27.0",
     "playwright>=1.40.0",
 ]
