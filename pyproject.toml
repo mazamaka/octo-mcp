@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "octo-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server for Octo Browser — control antidetect browser profiles with AI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,9 +39,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # 2.0 removed the low-level @server.list_tools()/@server.call_tool() decorators
-    # this server is built on; migrating to the MCPServer API is a separate change.
-    "mcp>=1.0.0,<2",
+    "mcp>=2.0.0",
     "httpx>=0.27.0",
     "playwright>=1.40.0",
 ]

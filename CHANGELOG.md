@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0
+
+### Changed
+
+- **Migrated to MCP SDK 2.x** (`mcp>=2.0.0`). 2.0 removed the low-level
+  `@server.list_tools()` / `@server.call_tool()` decorators this server was built on,
+  so a clean install crashed on import; the server now uses the `MCPServer` API.
+  Tool names, arguments and output text are unchanged.
+- Tool schemas are now generated from the Python signatures: argument descriptions come
+  from `Field(description=...)` and allowed values from `Literal`, so invalid arguments
+  (`wait_until`, `button`, `state`, `direction`, fingerprint `os`) are rejected by the SDK
+  before any browser work starts, instead of by hand-written checks.
+- Tool failures are returned as protocol-level errors (`is_error`) rather than text that
+  merely starts with "Error".
+
+### Added
+
+- Server-level `instructions` describing the start -> connect -> drive flow.
+- Tests over the tool surface: full name list, required arguments, enums, argument
+  descriptions, dispatch and the screenshot image path.
+
 ## 0.2.0
 
 Audit against the current [Octo Browser API reference](https://documenter.getpostman.com/view/1801428/UVC6i6eA).

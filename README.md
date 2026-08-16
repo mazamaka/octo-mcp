@@ -186,7 +186,7 @@ Ask Claude: *"Check if Octo Browser is running"* -- it will use `octo_health_che
 
 | Tool | Description |
 |------|-------------|
-| `browser_navigate` | Navigate to URL with configurable wait strategy (`load`, `domcontentloaded`, `networkidle`) |
+| `browser_navigate` | Navigate to URL with configurable wait strategy (`load`, `domcontentloaded`, `networkidle`, `commit`) |
 | `browser_get_url` | Get the current page URL |
 | `browser_go_back` | Navigate back in history |
 | `browser_go_forward` | Navigate forward in history |
@@ -352,13 +352,13 @@ uv run mypy src/ tests/
 uv run pytest
 ```
 
-The test suite serves every Octo API response through `httpx.MockTransport`, so it
-needs neither a running Octo Browser nor network access. The same three checks run
-in CI on Python 3.10 and 3.13.
+The test suite serves every Octo API response through `httpx.MockTransport` and
+exercises the MCP tool surface in-process, so it needs neither a running Octo
+Browser nor network access. The same three checks run in CI on Python 3.10 and 3.13.
 
 ## Tech Stack
 
-- **[MCP SDK](https://github.com/modelcontextprotocol/python-sdk)** -- Model Context Protocol server framework
+- **[MCP SDK 2.x](https://github.com/modelcontextprotocol/python-sdk)** -- Model Context Protocol server framework; tool schemas are generated from the Python signatures
 - **[Playwright](https://playwright.dev/python/)** -- Browser automation via CDP (Chrome DevTools Protocol)
 - **[httpx](https://www.python-httpx.org/)** -- Async HTTP client for Octo Browser APIs
 - **[Hatchling](https://hatch.pypa.io/)** -- Modern Python build system

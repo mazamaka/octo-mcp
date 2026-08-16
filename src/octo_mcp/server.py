@@ -4,24 +4,23 @@ Octo Browser MCP server.
 
 Exposes Octo Browser profile management (local + cloud API) and Playwright/CDP
 browser automation as MCP tools, so an AI assistant can drive antidetect profiles.
+
+Tool schemas are derived from the function signatures below: parameter
+descriptions come from Field(description=...), allowed values from Literal, and
+each tool's description from its docstring.
 """
 
-import asyncio
-import base64
 import json
 import logging
 import os
 import sys
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import (
-    ImageContent,
-    TextContent,
-    Tool,
-)
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Image
+from pydantic import Field
 
+from . import __version__
 from .browser_manager import BrowserManager
 from .octo_client import OctoCloudClient, OctoLocalClient, extract_ws_endpoint
 
@@ -34,13 +33,20 @@ OCTO_USERNAME = os.getenv("OCTO_USERNAME", "")
 OCTO_PASSWORD = os.getenv("OCTO_PASSWORD", "")
 OCTO_API_TOKEN = os.getenv("OCTO_API_TOKEN", "")
 
-# Playwright navigation wait strategies
-WAIT_UNTIL_STATES = ("load", "domcontentloaded", "networkidle", "commit")
-# Playwright element states for wait_for_selector
-SELECTOR_STATES = ("attached", "detached", "visible", "hidden")
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 # Truncate huge pages so a single tool call cannot blow up the context
 MAX_HTML_CHARS = 50_000
+
+# Repeated parameter annotations
+Selector = Annotated[str, Field(description="CSS selector of the element")]
+OptionalSelector = Annotated[
+    str | None, Field(description="CSS selector of the element (optional)")
+]
+Headless = Annotated[bool, Field(description="Run without a GUI")]
+ProfilePassword = Annotated[
+    str | None, Field(description="Profile password, if the profile is protected")
+]
 
 octo_client: OctoLocalClient | None = None
 octo_cloud_client: OctoCloudClient | None = None
@@ -76,1008 +82,537 @@ def get_octo_cloud_client() -> OctoCloudClient:
     return octo_cloud_client
 
 
-app = Server("octo-mcp")
+def _log_level() -> Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
+    """Log level from the environment, falling back to WARNING."""
+    level = os.getenv("OCTO_LOG_LEVEL", "WARNING").upper()
+    if level not in LOG_LEVELS:
+        return "WARNING"
+    return level  # type: ignore[return-value]
 
 
-@app.list_tools()  # type: ignore[no-untyped-call, untyped-decorator]
-async def list_tools() -> list[Tool]:
-    """List the tools exposed by this server."""
-    return [
-        # === Profile management (local API) ===
-        Tool(
-            name="octo_health_check",
-            description=(
-                "Check that the Octo Browser API is reachable. Call this first to verify "
-                "the app is running."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="octo_list_profiles",
-            description=(
-                "List the profiles currently running on this machine. Shows UUID, title "
-                "and ws_endpoint for each."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="octo_start_profile",
-            description=(
-                "Start an Octo Browser profile by UUID. Returns the ws_endpoint for the CDP "
-                "connection. If the profile is already running, returns its current data."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "uuid": {
-                        "type": "string",
-                        "description": "Octo Browser profile UUID",
-                    },
-                    "headless": {
-                        "type": "boolean",
-                        "description": "Run without a GUI",
-                        "default": False,
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Profile password, if the profile is protected",
-                    },
-                },
-                "required": ["uuid"],
-            },
-        ),
-        Tool(
-            name="octo_stop_profile",
-            description="Stop a running Octo Browser profile by UUID.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "uuid": {
-                        "type": "string",
-                        "description": "UUID of the profile to stop",
-                    },
-                    "force": {
-                        "type": "boolean",
-                        "description": "Force stop (use when a graceful stop does not work)",
-                        "default": False,
-                    },
-                },
-                "required": ["uuid"],
-            },
-        ),
-        Tool(
-            name="octo_start_one_time_profile",
-            description=(
-                "Create and start a one-time (temporary) profile. It is removed once stopped "
-                "and starts faster than a regular profile, which suits scraping."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "os": {
-                        "type": "string",
-                        "description": "Fingerprint OS: 'win', 'mac', 'lin' or 'android'",
-                        "default": "win",
-                    },
-                    "headless": {
-                        "type": "boolean",
-                        "description": "Run without a GUI",
-                        "default": False,
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="octo_find_profile_by_name",
-            description=(
-                "Find a profile by title using the cloud API. The search matches from the "
-                "beginning of the title. Requires OCTO_API_TOKEN."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Profile title to look for (e.g. '5249_US')",
-                    },
-                    "exact_match": {
-                        "type": "boolean",
-                        "description": "Require an exact title match",
-                        "default": True,
-                    },
-                },
-                "required": ["name"],
-            },
-        ),
-        Tool(
-            name="octo_start_profile_by_name",
-            description=(
-                "Find a profile by title and start it (find + start in one call). "
-                "Requires OCTO_API_TOKEN."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Title of the profile to find and start (e.g. '5249_US')",
-                    },
-                    "headless": {
-                        "type": "boolean",
-                        "description": "Run without a GUI",
-                        "default": False,
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Profile password, if the profile is protected",
-                    },
-                },
-                "required": ["name"],
-            },
-        ),
-        Tool(
-            name="octo_search_profiles",
-            description=(
-                "Search profiles by title prefix or tags using the cloud API. Several tags "
-                "mean AND. Requires OCTO_API_TOKEN."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "search": {
-                        "type": "string",
-                        "description": "Title prefix (matches from the start of the title)",
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Tags to filter by; a profile must carry all of them",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results",
-                        "default": 20,
-                    },
-                    "ordering": {
-                        "type": "string",
-                        "description": (
-                            "Sort order: 'created', '-created', 'active', '-active', "
-                            "'title', '-title'"
-                        ),
-                    },
-                    "status": {
-                        "type": "integer",
-                        "description": "Filter by numeric profile status",
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="octo_get_profile",
-            description=(
-                "Get full profile data by UUID: fingerprint, proxy, extensions, description, "
-                "tags. Uses the cloud API."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "uuid": {
-                        "type": "string",
-                        "description": "Profile UUID",
-                    },
-                },
-                "required": ["uuid"],
-            },
-        ),
-        Tool(
-            name="octo_get_extensions",
-            description="List the team's browser extensions with name, version and UUID.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="octo_delete_extensions",
-            description=(
-                "Delete team extensions by UUID. Extensions in use by a running profile come "
-                "back once that profile stops."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "uuids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Extension UUIDs to delete (e.g. 'abc123@2.0.12')",
-                    },
-                },
-                "required": ["uuids"],
-            },
-        ),
-        Tool(
-            name="octo_get_tags",
-            description="List all profile tags with name, color and UUID.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="octo_get_proxies",
-            description="List all saved proxies with type, host, port and UUID.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        # === Browser connection ===
-        Tool(
-            name="browser_connect",
-            description=(
-                "Connect to a running Octo Browser profile over CDP. Call after octo_start_profile."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "ws_endpoint": {
-                        "type": "string",
-                        "description": "CDP WebSocket endpoint (from octo_start_profile)",
-                    },
-                },
-                "required": ["ws_endpoint"],
-            },
-        ),
-        Tool(
-            name="browser_disconnect",
-            description="Disconnect from the browser (does not stop the Octo profile).",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        # === Navigation ===
-        Tool(
-            name="browser_navigate",
-            description="Navigate to a URL.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "Target URL",
-                    },
-                    "wait_until": {
-                        "type": "string",
-                        "enum": list(WAIT_UNTIL_STATES),
-                        "description": "Wait strategy",
-                        "default": "domcontentloaded",
-                    },
-                },
-                "required": ["url"],
-            },
-        ),
-        Tool(
-            name="browser_get_url",
-            description="Get the current page URL.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="browser_go_back",
-            description="Go back in browser history.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="browser_go_forward",
-            description="Go forward in browser history.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="browser_reload",
-            description="Reload the current page.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        # === Interaction ===
-        Tool(
-            name="browser_click",
-            description="Click an element by CSS selector, or click at (x, y) coordinates.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the element",
-                    },
-                    "x": {
-                        "type": "number",
-                        "description": "X coordinate",
-                    },
-                    "y": {
-                        "type": "number",
-                        "description": "Y coordinate",
-                    },
-                    "button": {
-                        "type": "string",
-                        "enum": ["left", "right", "middle"],
-                        "description": "Mouse button",
-                        "default": "left",
-                    },
-                    "click_count": {
-                        "type": "integer",
-                        "description": "Number of clicks (2 for a double click)",
-                        "default": 1,
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="browser_type",
-            description=(
-                "Type text. With a selector the value is filled instantly; without one the "
-                "text is typed key by key into the focused element."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "Text to type",
-                    },
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the input element (optional)",
-                    },
-                    "delay": {
-                        "type": "number",
-                        "description": "Delay between keystrokes in ms (no-selector mode)",
-                        "default": 50,
-                    },
-                },
-                "required": ["text"],
-            },
-        ),
-        Tool(
-            name="browser_press_key",
-            description="Press a keyboard key (Enter, Tab, Escape, ArrowDown, ...).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": "Key name: 'Enter', 'Tab', 'Escape', 'Backspace', ...",
-                    },
-                },
-                "required": ["key"],
-            },
-        ),
-        Tool(
-            name="browser_scroll",
-            description="Scroll the page, or a specific element when a selector is given.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "direction": {
-                        "type": "string",
-                        "enum": ["up", "down", "left", "right"],
-                        "description": "Scroll direction",
-                        "default": "down",
-                    },
-                    "amount": {
-                        "type": "number",
-                        "description": "Pixels to scroll",
-                        "default": 300,
-                    },
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the element to scroll (optional)",
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="browser_hover",
-            description="Hover over an element (useful for dropdowns and tooltips).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the element",
-                    },
-                },
-                "required": ["selector"],
-            },
-        ),
-        Tool(
-            name="browser_select",
-            description="Select an option in a <select> dropdown.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the select element",
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "Value of the option to select",
-                    },
-                },
-                "required": ["selector", "value"],
-            },
-        ),
-        # === Information extraction ===
-        Tool(
-            name="browser_screenshot",
-            description="Take a screenshot of the page or of a single element. Returns a PNG.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the element (optional, else the page)",
-                    },
-                    "full_page": {
-                        "type": "boolean",
-                        "description": "Capture the whole scrollable page",
-                        "default": False,
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="browser_get_text",
-            description="Get the text content of an element.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the element",
-                    },
-                },
-                "required": ["selector"],
-            },
-        ),
-        Tool(
-            name="browser_get_html",
-            description="Get the HTML of the page or of an element.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the element (optional)",
-                    },
-                    "outer": {
-                        "type": "boolean",
-                        "description": "Include the element's own tag (outerHTML)",
-                        "default": True,
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="browser_get_attribute",
-            description="Get an attribute value from an element.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the element",
-                    },
-                    "attribute": {
-                        "type": "string",
-                        "description": "Attribute name",
-                    },
-                },
-                "required": ["selector", "attribute"],
-            },
-        ),
-        Tool(
-            name="browser_query_selector_all",
-            description="Find all elements matching a selector and return their metadata.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector",
-                    },
-                },
-                "required": ["selector"],
-            },
-        ),
-        Tool(
-            name="browser_wait_for_selector",
-            description="Wait for an element to reach a given state.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector of the element",
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in milliseconds",
-                        "default": 30000,
-                    },
-                    "state": {
-                        "type": "string",
-                        "enum": list(SELECTOR_STATES),
-                        "description": "Target state",
-                        "default": "visible",
-                    },
-                },
-                "required": ["selector"],
-            },
-        ),
-        # === JavaScript ===
-        Tool(
-            name="browser_evaluate",
-            description="Run JavaScript on the page and return the result.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "script": {
-                        "type": "string",
-                        "description": "JavaScript code to execute",
-                    },
-                },
-                "required": ["script"],
-            },
-        ),
-        # === Tabs ===
-        Tool(
-            name="browser_list_tabs",
-            description="List the open tabs with title, URL and active flag.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="browser_switch_tab",
-            description="Switch to a tab by index.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "index": {
-                        "type": "integer",
-                        "description": "Tab index (zero-based)",
-                    },
-                },
-                "required": ["index"],
-            },
-        ),
-        Tool(
-            name="browser_new_tab",
-            description="Open a new tab, optionally navigating to a URL.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL to open (optional)",
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="browser_close_tab",
-            description="Close the current tab.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-    ]
+server = MCPServer(
+    "octo-mcp",
+    version=__version__,
+    instructions=(
+        "Control Octo Browser antidetect profiles: start and stop them through the local "
+        "API, search and inspect them through the cloud API, then drive the running "
+        "browser over CDP. Typical flow: octo_start_profile (or octo_start_profile_by_name) "
+        "-> browser_connect with the returned ws_endpoint -> browser_* tools."
+    ),
+    log_level=_log_level(),
+)
 
 
-@app.call_tool()  # type: ignore[untyped-decorator]
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent | ImageContent]:
-    """Dispatch a tool call, reporting failures as text instead of crashing."""
-    logger.info("Tool call: %s %s", name, arguments)
-    try:
-        return await _handle_tool(name, arguments)
-    except Exception as e:
-        logger.exception("Tool %s failed", name)
-        return [TextContent(type="text", text=f"Error ({type(e).__name__}): {e}")]
+# === Profile management (local API) ===
 
 
-async def _handle_tool(name: str, args: dict[str, Any]) -> list[TextContent | ImageContent]:
-    """Tool implementations."""
+@server.tool()
+async def octo_health_check() -> str:
+    """Check that the Octo Browser API is reachable. Call this first to verify the app is running."""
     client = get_octo_client()
+    if not await client.health_check():
+        return (
+            f"Octo Browser API is unavailable at {client.base_url}. "
+            "Make sure Octo Browser is running."
+        )
+    version = await client.get_version()
+    return (
+        "Octo Browser API is available.\n"
+        f"Version: {version.get('current', 'unknown')} (latest: {version.get('latest', 'unknown')})"
+    )
+
+
+@server.tool()
+async def octo_list_profiles() -> str:
+    """List the profiles currently running on this machine, with UUID, title and ws_endpoint."""
+    profiles = await get_octo_client().get_active_profiles()
+    if not profiles:
+        return "No running profiles."
+
+    lines = ["Running profiles:"]
+    for p in profiles:
+        lines.append(f"- UUID: {p.get('uuid', 'N/A')}")
+        lines.append(f"  Title: {p.get('title', p.get('name', 'N/A'))}")
+        lines.append(f"  ws_endpoint: {extract_ws_endpoint(p) or 'N/A'}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@server.tool()
+async def octo_start_profile(
+    uuid: Annotated[str, Field(description="Octo Browser profile UUID")],
+    headless: Headless = False,
+    password: ProfilePassword = None,
+) -> str:
+    """Start a profile by UUID and return the ws_endpoint for the CDP connection.
+
+    If the profile is already running, its current data is returned instead.
+    """
+    result = await get_octo_client().get_or_start_profile(
+        uuid=uuid, headless=headless, password=password
+    )
+    return _format_started(uuid, result)
+
+
+@server.tool()
+async def octo_stop_profile(
+    uuid: Annotated[str, Field(description="UUID of the profile to stop")],
+    force: Annotated[
+        bool, Field(description="Force stop (use when a graceful stop does not work)")
+    ] = False,
+) -> str:
+    """Stop a running Octo Browser profile by UUID."""
+    client = get_octo_client()
+    if force:
+        await client.force_stop_profile(uuid)
+    else:
+        await client.stop_profile(uuid)
+    return f"Profile {uuid} stopped."
+
+
+@server.tool()
+async def octo_start_one_time_profile(
+    os: Annotated[  # noqa: A002 - the schema field is named "os"
+        Literal["win", "mac", "lin", "android"], Field(description="Fingerprint OS")
+    ] = "win",
+    headless: Headless = False,
+) -> str:
+    """Create and start a one-time (temporary) profile.
+
+    It is removed once stopped and starts faster than a regular profile, which suits scraping.
+    """
+    result = await get_octo_client().start_one_time_profile(fingerprint_os=os, headless=headless)
+    return (
+        f"One-time profile started.\n"
+        f"UUID: {result.get('uuid', 'N/A')}\n"
+        f"ws_endpoint: {extract_ws_endpoint(result)}\n\n"
+        "Pass this ws_endpoint to browser_connect. The profile is deleted when stopped."
+    )
+
+
+# === Profile search and management (cloud API) ===
+
+
+@server.tool()
+async def octo_find_profile_by_name(
+    name: Annotated[str, Field(description="Profile title to look for (e.g. '5249_US')")],
+    exact_match: Annotated[bool, Field(description="Require an exact title match")] = True,
+) -> str:
+    """Find a profile by title. The API matches from the beginning of the title.
+
+    Requires OCTO_API_TOKEN.
+    """
+    profile = await get_octo_cloud_client().find_profile_by_name(name, exact_match=exact_match)
+    if not profile:
+        return f"No profile titled '{name}' was found."
+    return (
+        f"Profile found:\n"
+        f"- UUID: {profile.get('uuid')}\n"
+        f"- Title: {profile.get('title')}\n"
+        f"- Status: {profile.get('status', 'N/A')}\n"
+        f"- Tags: {profile.get('tags', [])}"
+    )
+
+
+@server.tool()
+async def octo_start_profile_by_name(
+    name: Annotated[
+        str, Field(description="Title of the profile to find and start (e.g. '5249_US')")
+    ],
+    headless: Headless = False,
+    password: ProfilePassword = None,
+) -> str:
+    """Find a profile by title and start it (find + start in one call). Requires OCTO_API_TOKEN."""
+    profile = await get_octo_cloud_client().find_profile_by_name(name, exact_match=True)
+    if not profile:
+        return f"No profile titled '{name}' was found."
+
+    uuid = profile.get("uuid")
+    if not uuid:
+        return f"Profile '{name}' has no UUID in the API."
+
+    result = await get_octo_client().get_or_start_profile(
+        uuid=uuid, headless=headless, password=password
+    )
+    return _format_started(f"'{name}' ({uuid})", result)
+
+
+@server.tool()
+async def octo_search_profiles(
+    search: Annotated[
+        str | None, Field(description="Title prefix (matches from the start of the title)")
+    ] = None,
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Tags to filter by; a profile must carry all of them"),
+    ] = None,
+    limit: Annotated[int, Field(description="Maximum number of results", ge=1)] = 20,
+    ordering: Annotated[
+        Literal["created", "-created", "active", "-active", "title", "-title"] | None,
+        Field(description="Sort order"),
+    ] = None,
+    status: Annotated[int | None, Field(description="Filter by numeric profile status")] = None,
+) -> str:
+    """Search profiles by title prefix or tags. Several tags mean AND. Requires OCTO_API_TOKEN."""
+    profiles = await get_octo_cloud_client().search_profiles(
+        search=search, tags=tags, page_len=limit, ordering=ordering, status=status
+    )
+    # page_len is snapped to the nearest value the API accepts, so trim here
+    profiles = profiles[:limit]
+
+    if not profiles:
+        return "No profiles found."
+
+    lines = [f"Profiles found: {len(profiles)}"]
+    for p in profiles:
+        lines.append(f"- {p.get('title', 'N/A')} (UUID: {p.get('uuid', 'N/A')})")
+        if p.get("tags"):
+            lines.append(f"  Tags: {', '.join(p['tags'])}")
+    return "\n".join(lines)
+
+
+@server.tool()
+async def octo_get_profile(
+    uuid: Annotated[str, Field(description="Profile UUID")],
+) -> str:
+    """Get full profile data by UUID: fingerprint, proxy, extensions, description, tags."""
+    return _format_profile(await get_octo_cloud_client().get_profile(uuid), uuid)
+
+
+# === Team resources (cloud API) ===
+
+
+@server.tool()
+async def octo_get_extensions() -> str:
+    """List the team's browser extensions with name, version and UUID."""
+    extensions = await get_octo_cloud_client().get_team_extensions()
+    if not extensions:
+        return "No extensions found."
+
+    lines = [f"Team extensions ({len(extensions)}):"]
+    for ext in extensions:
+        name = ext.get("name", ext.get("title", "N/A"))
+        lines.append(f"- {name} v{ext.get('version', 'N/A')} (UUID: {ext.get('uuid', 'N/A')})")
+    return "\n".join(lines)
+
+
+@server.tool()
+async def octo_delete_extensions(
+    uuids: Annotated[
+        list[str], Field(description="Extension UUIDs to delete (e.g. 'abc123@2.0.12')")
+    ],
+) -> str:
+    """Delete team extensions by UUID.
+
+    Extensions in use by a running profile come back once that profile stops.
+    """
+    await get_octo_cloud_client().delete_team_extensions(uuids)
+    return f"Extensions deleted: {len(uuids)}"
+
+
+@server.tool()
+async def octo_get_tags() -> str:
+    """List all profile tags with name, color and UUID."""
+    tags = await get_octo_cloud_client().get_tags()
+    if not tags:
+        return "No tags found."
+
+    lines = [f"Tags ({len(tags)}):"]
+    for tag in tags:
+        lines.append(
+            f"- {tag.get('name', 'N/A')} "
+            f"(color: {tag.get('color', 'N/A')}, UUID: {tag.get('uuid', 'N/A')})"
+        )
+    return "\n".join(lines)
+
+
+@server.tool()
+async def octo_get_proxies() -> str:
+    """List all saved proxies with type, host, port and UUID."""
+    proxies = await get_octo_cloud_client().get_proxies()
+    if not proxies:
+        return "No proxies found."
+
+    lines = [f"Proxies ({len(proxies)}):"]
+    for p in proxies:
+        display = f"{p.get('type', 'N/A')}://{p.get('host', 'N/A')}:{p.get('port', 'N/A')}"
+        if p.get("title"):
+            display = f"{p['title']} ({display})"
+        lines.append(f"- {display} (UUID: {p.get('uuid', 'N/A')})")
+    return "\n".join(lines)
+
+
+# === Browser connection ===
+
+
+@server.tool()
+async def browser_connect(
+    ws_endpoint: Annotated[
+        str, Field(description="CDP WebSocket endpoint (from octo_start_profile)")
+    ],
+) -> str:
+    """Connect to a running Octo Browser profile over CDP. Call after octo_start_profile."""
+    await get_browser_manager().connect(ws_endpoint)
+    return f"Connected to the browser at {ws_endpoint}"
+
+
+@server.tool()
+async def browser_disconnect() -> str:
+    """Disconnect from the browser (does not stop the Octo profile)."""
+    await get_browser_manager().disconnect()
+    return "Disconnected from the browser."
+
+
+# === Navigation ===
+
+
+@server.tool()
+async def browser_navigate(
+    url: Annotated[str, Field(description="Target URL")],
+    wait_until: Annotated[
+        Literal["load", "domcontentloaded", "networkidle", "commit"],
+        Field(description="Wait strategy"),
+    ] = "domcontentloaded",
+) -> str:
+    """Navigate to a URL."""
+    await get_browser_manager().navigate(url, wait_until=wait_until)
+    return f"Navigated to {url}"
+
+
+@server.tool()
+async def browser_get_url() -> str:
+    """Get the current page URL."""
+    return f"Current URL: {await get_browser_manager().get_url()}"
+
+
+@server.tool()
+async def browser_go_back() -> str:
+    """Go back in browser history."""
+    await get_browser_manager().go_back()
+    return "Went back"
+
+
+@server.tool()
+async def browser_go_forward() -> str:
+    """Go forward in browser history."""
+    await get_browser_manager().go_forward()
+    return "Went forward"
+
+
+@server.tool()
+async def browser_reload() -> str:
+    """Reload the current page."""
+    await get_browser_manager().reload()
+    return "Page reloaded"
+
+
+# === Interaction ===
+
+
+@server.tool()
+async def browser_click(
+    selector: OptionalSelector = None,
+    x: Annotated[float | None, Field(description="X coordinate")] = None,
+    y: Annotated[float | None, Field(description="Y coordinate")] = None,
+    button: Annotated[Literal["left", "right", "middle"], Field(description="Mouse button")] = (
+        "left"
+    ),
+    click_count: Annotated[
+        int, Field(description="Number of clicks (2 for a double click)", ge=1)
+    ] = 1,
+) -> str:
+    """Click an element by CSS selector, or click at (x, y) coordinates."""
     manager = get_browser_manager()
 
-    # === Profile management ===
+    if selector:
+        await manager.click(selector=selector, button=button, click_count=click_count)
+        return f"Clicked {selector}"
+    if x is not None and y is not None:
+        await manager.click(x=x, y=y, button=button, click_count=click_count)
+        return f"Clicked at ({x}, {y})"
+    return "Provide either a selector or (x, y) coordinates"
 
-    if name == "octo_health_check":
-        if await client.health_check():
-            version = await client.get_version()
-            current = version.get("current", "unknown")
-            latest = version.get("latest", "unknown")
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Octo Browser API is available.\nVersion: {current} (latest: {latest})",
-                )
-            ]
-        return [
-            TextContent(
-                type="text",
-                text=(
-                    f"Octo Browser API is unavailable at {client.base_url}. "
-                    "Make sure Octo Browser is running."
-                ),
-            )
-        ]
 
-    if name == "octo_list_profiles":
-        profiles = await client.get_active_profiles()
-        if not profiles:
-            return [TextContent(type="text", text="No running profiles.")]
+@server.tool()
+async def browser_type(
+    text: Annotated[str, Field(description="Text to type")],
+    selector: Annotated[
+        str | None, Field(description="CSS selector of the input element (optional)")
+    ] = None,
+    delay: Annotated[
+        float, Field(description="Delay between keystrokes in ms (no-selector mode)", ge=0)
+    ] = 50,
+) -> str:
+    """Type text.
 
-        lines = ["Running profiles:"]
-        for p in profiles:
-            lines.append(f"- UUID: {p.get('uuid', 'N/A')}")
-            lines.append(f"  Title: {p.get('title', p.get('name', 'N/A'))}")
-            lines.append(f"  ws_endpoint: {extract_ws_endpoint(p) or 'N/A'}")
-            lines.append("")
-        return [TextContent(type="text", text="\n".join(lines))]
+    With a selector the value is filled instantly; without one the text is typed
+    key by key into the focused element.
+    """
+    await get_browser_manager().type_text(text, selector=selector, delay=delay)
+    return f"Typed: {text if len(text) <= 50 else text[:50] + '...'}"
 
-    if name == "octo_start_profile":
-        uuid = args["uuid"]
-        result = await client.get_or_start_profile(
-            uuid=uuid,
-            headless=args.get("headless", False),
-            password=args.get("password"),
-        )
-        return [TextContent(type="text", text=_format_started(uuid, result))]
 
-    if name == "octo_stop_profile":
-        uuid = args["uuid"]
-        if args.get("force", False):
-            await client.force_stop_profile(uuid)
-        else:
-            await client.stop_profile(uuid)
-        return [TextContent(type="text", text=f"Profile {uuid} stopped.")]
+@server.tool()
+async def browser_press_key(
+    key: Annotated[str, Field(description="Key name: 'Enter', 'Tab', 'Escape', 'Backspace', ...")],
+) -> str:
+    """Press a keyboard key (Enter, Tab, Escape, ArrowDown, ...)."""
+    await get_browser_manager().press_key(key)
+    return f"Key pressed: {key}"
 
-    if name == "octo_start_one_time_profile":
-        result = await client.start_one_time_profile(
-            fingerprint_os=args.get("os", "win"),
-            headless=args.get("headless", False),
-        )
-        return [
-            TextContent(
-                type="text",
-                text=(
-                    f"One-time profile started.\n"
-                    f"UUID: {result.get('uuid', 'N/A')}\n"
-                    f"ws_endpoint: {extract_ws_endpoint(result)}\n\n"
-                    "Pass this ws_endpoint to browser_connect. "
-                    "The profile is deleted when stopped."
-                ),
-            )
-        ]
 
-    if name == "octo_find_profile_by_name":
-        cloud = get_octo_cloud_client()
-        profile_name = args["name"]
-        profile = await cloud.find_profile_by_name(
-            profile_name, exact_match=args.get("exact_match", True)
-        )
+@server.tool()
+async def browser_scroll(
+    direction: Annotated[
+        Literal["up", "down", "left", "right"], Field(description="Scroll direction")
+    ] = "down",
+    amount: Annotated[int, Field(description="Pixels to scroll")] = 300,
+    selector: Annotated[
+        str | None, Field(description="CSS selector of the element to scroll (optional)")
+    ] = None,
+) -> str:
+    """Scroll the page, or a specific element when a selector is given."""
+    await get_browser_manager().scroll(direction=direction, amount=amount, selector=selector)
+    return f"Scrolled {direction} by {amount}px"
 
-        if profile:
-            return [
-                TextContent(
-                    type="text",
-                    text=(
-                        f"Profile found:\n"
-                        f"- UUID: {profile.get('uuid')}\n"
-                        f"- Title: {profile.get('title')}\n"
-                        f"- Status: {profile.get('status', 'N/A')}\n"
-                        f"- Tags: {profile.get('tags', [])}"
-                    ),
-                )
-            ]
-        return [TextContent(type="text", text=f"No profile titled '{profile_name}' was found.")]
 
-    if name == "octo_start_profile_by_name":
-        cloud = get_octo_cloud_client()
-        profile_name = args["name"]
+@server.tool()
+async def browser_hover(selector: Selector) -> str:
+    """Hover over an element (useful for dropdowns and tooltips)."""
+    await get_browser_manager().hover(selector)
+    return f"Hovering over {selector}"
 
-        profile = await cloud.find_profile_by_name(profile_name, exact_match=True)
-        if not profile:
-            return [TextContent(type="text", text=f"No profile titled '{profile_name}' was found.")]
 
-        uuid = profile.get("uuid")
-        if not uuid:
-            return [
-                TextContent(type="text", text=f"Profile '{profile_name}' has no UUID in the API.")
-            ]
+@server.tool()
+async def browser_select(
+    selector: Annotated[str, Field(description="CSS selector of the select element")],
+    value: Annotated[str, Field(description="Value of the option to select")],
+) -> str:
+    """Select an option in a <select> dropdown."""
+    await get_browser_manager().select_option(selector, value)
+    return f"Selected {value} in {selector}"
 
-        result = await client.get_or_start_profile(
-            uuid=uuid,
-            headless=args.get("headless", False),
-            password=args.get("password"),
-        )
-        return [
-            TextContent(type="text", text=_format_started(f"'{profile_name}' ({uuid})", result))
-        ]
 
-    if name == "octo_search_profiles":
-        cloud = get_octo_cloud_client()
-        limit = args.get("limit", 20)
+# === Information extraction ===
 
-        profiles = await cloud.search_profiles(
-            search=args.get("search"),
-            tags=args.get("tags"),
-            page_len=limit,
-            ordering=args.get("ordering"),
-            status=args.get("status"),
-        )
-        # page_len is snapped to the nearest value the API accepts, so trim here
-        profiles = profiles[:limit]
 
-        if not profiles:
-            return [TextContent(type="text", text="No profiles found.")]
+@server.tool()
+async def browser_screenshot(
+    selector: Annotated[
+        str | None,
+        Field(description="CSS selector of the element (optional, else the page)"),
+    ] = None,
+    full_page: Annotated[bool, Field(description="Capture the whole scrollable page")] = False,
+) -> Image:
+    """Take a screenshot of the page or of a single element. Returns a PNG."""
+    data = await get_browser_manager().screenshot(selector=selector, full_page=full_page)
+    return Image(data=data, format="png")
 
-        lines = [f"Profiles found: {len(profiles)}"]
-        for p in profiles:
-            lines.append(f"- {p.get('title', 'N/A')} (UUID: {p.get('uuid', 'N/A')})")
-            if p.get("tags"):
-                lines.append(f"  Tags: {', '.join(p['tags'])}")
-        return [TextContent(type="text", text="\n".join(lines))]
 
-    if name == "octo_get_profile":
-        cloud = get_octo_cloud_client()
-        uuid = args["uuid"]
-        profile = await cloud.get_profile(uuid)
-        return [TextContent(type="text", text=_format_profile(profile, uuid))]
+@server.tool()
+async def browser_get_text(selector: Selector) -> str:
+    """Get the text content of an element."""
+    return await get_browser_manager().get_text(selector)
 
-    if name == "octo_get_extensions":
-        cloud = get_octo_cloud_client()
-        extensions = await cloud.get_team_extensions()
 
-        if not extensions:
-            return [TextContent(type="text", text="No extensions found.")]
+@server.tool()
+async def browser_get_html(
+    selector: OptionalSelector = None,
+    outer: Annotated[bool, Field(description="Include the element's own tag (outerHTML)")] = True,
+) -> str:
+    """Get the HTML of the page or of an element."""
+    html = await get_browser_manager().get_html(selector=selector, outer=outer)
+    if len(html) > MAX_HTML_CHARS:
+        html = html[:MAX_HTML_CHARS] + "\n... (truncated)"
+    return html
 
-        lines = [f"Team extensions ({len(extensions)}):"]
-        for ext in extensions:
-            ext_name = ext.get("name", ext.get("title", "N/A"))
-            lines.append(
-                f"- {ext_name} v{ext.get('version', 'N/A')} (UUID: {ext.get('uuid', 'N/A')})"
-            )
-        return [TextContent(type="text", text="\n".join(lines))]
 
-    if name == "octo_delete_extensions":
-        cloud = get_octo_cloud_client()
-        uuids = args["uuids"]
-        await cloud.delete_team_extensions(uuids)
-        return [TextContent(type="text", text=f"Extensions deleted: {len(uuids)}")]
+@server.tool()
+async def browser_get_attribute(
+    selector: Selector,
+    attribute: Annotated[str, Field(description="Attribute name")],
+) -> str:
+    """Get an attribute value from an element."""
+    return f"{attribute}={await get_browser_manager().get_attribute(selector, attribute)}"
 
-    if name == "octo_get_tags":
-        cloud = get_octo_cloud_client()
-        tags = await cloud.get_tags()
 
-        if not tags:
-            return [TextContent(type="text", text="No tags found.")]
+@server.tool()
+async def browser_query_selector_all(
+    selector: Annotated[str, Field(description="CSS selector")],
+) -> str:
+    """Find all elements matching a selector and return their metadata."""
+    elements = await get_browser_manager().query_selector_all(selector)
+    return json.dumps(elements, ensure_ascii=False, indent=2)
 
-        lines = [f"Tags ({len(tags)}):"]
-        for tag in tags:
-            lines.append(
-                f"- {tag.get('name', 'N/A')} "
-                f"(color: {tag.get('color', 'N/A')}, UUID: {tag.get('uuid', 'N/A')})"
-            )
-        return [TextContent(type="text", text="\n".join(lines))]
 
-    if name == "octo_get_proxies":
-        cloud = get_octo_cloud_client()
-        proxies = await cloud.get_proxies()
+@server.tool()
+async def browser_wait_for_selector(
+    selector: Selector,
+    timeout: Annotated[int, Field(description="Timeout in milliseconds", ge=0)] = 30000,
+    state: Annotated[
+        Literal["attached", "detached", "visible", "hidden"], Field(description="Target state")
+    ] = "visible",
+) -> str:
+    """Wait for an element to reach a given state."""
+    await get_browser_manager().wait_for_selector(selector, timeout=timeout, state=state)
+    return f"Element {selector} reached state '{state}'"
 
-        if not proxies:
-            return [TextContent(type="text", text="No proxies found.")]
 
-        lines = [f"Proxies ({len(proxies)}):"]
-        for p in proxies:
-            display = f"{p.get('type', 'N/A')}://{p.get('host', 'N/A')}:{p.get('port', 'N/A')}"
-            title = p.get("title", "")
-            if title:
-                display = f"{title} ({display})"
-            lines.append(f"- {display} (UUID: {p.get('uuid', 'N/A')})")
-        return [TextContent(type="text", text="\n".join(lines))]
+# === JavaScript ===
 
-    # === Browser connection ===
 
-    if name == "browser_connect":
-        ws_endpoint = args["ws_endpoint"]
-        await manager.connect(ws_endpoint)
-        return [TextContent(type="text", text=f"Connected to the browser at {ws_endpoint}")]
+@server.tool()
+async def browser_evaluate(
+    script: Annotated[str, Field(description="JavaScript code to execute")],
+) -> str:
+    """Run JavaScript on the page and return the result."""
+    result = await get_browser_manager().evaluate(script)
+    if result is None:
+        return "Done (result: null)"
+    return f"Result: {json.dumps(result, ensure_ascii=False, indent=2)}"
 
-    if name == "browser_disconnect":
-        await manager.disconnect()
-        return [TextContent(type="text", text="Disconnected from the browser.")]
 
-    # === Navigation ===
+# === Tabs ===
 
-    if name == "browser_navigate":
-        url = args["url"]
-        wait_until = args.get("wait_until", "domcontentloaded")
-        if wait_until not in WAIT_UNTIL_STATES:
-            raise ValueError(
-                f"Invalid wait_until '{wait_until}'. Allowed: {', '.join(WAIT_UNTIL_STATES)}"
-            )
-        await manager.navigate(
-            url,
-            wait_until=cast(
-                Literal["commit", "domcontentloaded", "load", "networkidle"], wait_until
-            ),
-        )
-        return [TextContent(type="text", text=f"Navigated to {url}")]
 
-    if name == "browser_get_url":
-        return [TextContent(type="text", text=f"Current URL: {await manager.get_url()}")]
+@server.tool()
+async def browser_list_tabs() -> str:
+    """List the open tabs with title, URL and active flag."""
+    tabs = await get_browser_manager().list_tabs()
+    lines = ["Open tabs:"]
+    for i, tab in enumerate(tabs):
+        marker = " (active)" if tab.get("active") else ""
+        lines.append(f"  [{i}] {tab.get('title', 'N/A')}{marker}")
+        lines.append(f"      URL: {tab.get('url', 'N/A')}")
+    return "\n".join(lines)
 
-    if name == "browser_go_back":
-        await manager.go_back()
-        return [TextContent(type="text", text="Went back")]
 
-    if name == "browser_go_forward":
-        await manager.go_forward()
-        return [TextContent(type="text", text="Went forward")]
+@server.tool()
+async def browser_switch_tab(
+    index: Annotated[int, Field(description="Tab index (zero-based)", ge=0)],
+) -> str:
+    """Switch to a tab by index."""
+    await get_browser_manager().switch_tab(index)
+    return f"Switched to tab {index}"
 
-    if name == "browser_reload":
-        await manager.reload()
-        return [TextContent(type="text", text="Page reloaded")]
 
-    # === Interaction ===
+@server.tool()
+async def browser_new_tab(
+    url: Annotated[str | None, Field(description="URL to open (optional)")] = None,
+) -> str:
+    """Open a new tab, optionally navigating to a URL."""
+    await get_browser_manager().new_tab(url)
+    return f"New tab opened{': ' + url if url else ''}"
 
-    if name == "browser_click":
-        selector = args.get("selector")
-        x = args.get("x")
-        y = args.get("y")
-        button = args.get("button", "left")
-        click_count = args.get("click_count", 1)
 
-        if selector:
-            await manager.click(selector=selector, button=button, click_count=click_count)
-            return [TextContent(type="text", text=f"Clicked {selector}")]
-        if x is not None and y is not None:
-            await manager.click(x=x, y=y, button=button, click_count=click_count)
-            return [TextContent(type="text", text=f"Clicked at ({x}, {y})")]
-        return [TextContent(type="text", text="Provide either a selector or (x, y) coordinates")]
+@server.tool()
+async def browser_close_tab() -> str:
+    """Close the current tab."""
+    await get_browser_manager().close_tab()
+    return "Tab closed"
 
-    if name == "browser_type":
-        text = args["text"]
-        await manager.type_text(text, selector=args.get("selector"), delay=args.get("delay", 50))
-        preview = text if len(text) <= 50 else f"{text[:50]}..."
-        return [TextContent(type="text", text=f"Typed: {preview}")]
 
-    if name == "browser_press_key":
-        key = args["key"]
-        await manager.press_key(key)
-        return [TextContent(type="text", text=f"Key pressed: {key}")]
-
-    if name == "browser_scroll":
-        direction = args.get("direction", "down")
-        amount = args.get("amount", 300)
-        await manager.scroll(direction=direction, amount=amount, selector=args.get("selector"))
-        return [TextContent(type="text", text=f"Scrolled {direction} by {amount}px")]
-
-    if name == "browser_hover":
-        selector = args["selector"]
-        await manager.hover(selector)
-        return [TextContent(type="text", text=f"Hovering over {selector}")]
-
-    if name == "browser_select":
-        selector = args["selector"]
-        value = args["value"]
-        await manager.select_option(selector, value)
-        return [TextContent(type="text", text=f"Selected {value} in {selector}")]
-
-    # === Information extraction ===
-
-    if name == "browser_screenshot":
-        screenshot_bytes = await manager.screenshot(
-            selector=args.get("selector"), full_page=args.get("full_page", False)
-        )
-        return [
-            ImageContent(
-                type="image",
-                data=base64.b64encode(screenshot_bytes).decode("utf-8"),
-                mimeType="image/png",
-            )
-        ]
-
-    if name == "browser_get_text":
-        return [TextContent(type="text", text=await manager.get_text(args["selector"]))]
-
-    if name == "browser_get_html":
-        html = await manager.get_html(selector=args.get("selector"), outer=args.get("outer", True))
-        if len(html) > MAX_HTML_CHARS:
-            html = html[:MAX_HTML_CHARS] + "\n... (truncated)"
-        return [TextContent(type="text", text=html)]
-
-    if name == "browser_get_attribute":
-        attribute = args["attribute"]
-        value = await manager.get_attribute(args["selector"], attribute)
-        return [TextContent(type="text", text=f"{attribute}={value}")]
-
-    if name == "browser_query_selector_all":
-        elements = await manager.query_selector_all(args["selector"])
-        return [TextContent(type="text", text=json.dumps(elements, ensure_ascii=False, indent=2))]
-
-    if name == "browser_wait_for_selector":
-        selector = args["selector"]
-        state = args.get("state", "visible")
-        if state not in SELECTOR_STATES:
-            raise ValueError(f"Invalid state '{state}'. Allowed: {', '.join(SELECTOR_STATES)}")
-        await manager.wait_for_selector(
-            selector,
-            timeout=args.get("timeout", 30000),
-            state=cast(Literal["attached", "detached", "visible", "hidden"], state),
-        )
-        return [TextContent(type="text", text=f"Element {selector} reached state '{state}'")]
-
-    # === JavaScript ===
-
-    if name == "browser_evaluate":
-        result = await manager.evaluate(args["script"])
-        if result is None:
-            return [TextContent(type="text", text="Done (result: null)")]
-        return [
-            TextContent(
-                type="text", text=f"Result: {json.dumps(result, ensure_ascii=False, indent=2)}"
-            )
-        ]
-
-    # === Tabs ===
-
-    if name == "browser_list_tabs":
-        tabs = await manager.list_tabs()
-        lines = ["Open tabs:"]
-        for i, tab in enumerate(tabs):
-            marker = " (active)" if tab.get("active") else ""
-            lines.append(f"  [{i}] {tab.get('title', 'N/A')}{marker}")
-            lines.append(f"      URL: {tab.get('url', 'N/A')}")
-        return [TextContent(type="text", text="\n".join(lines))]
-
-    if name == "browser_switch_tab":
-        index = args["index"]
-        await manager.switch_tab(index)
-        return [TextContent(type="text", text=f"Switched to tab {index}")]
-
-    if name == "browser_new_tab":
-        url = args.get("url")
-        await manager.new_tab(url)
-        return [TextContent(type="text", text=f"New tab opened{': ' + url if url else ''}")]
-
-    if name == "browser_close_tab":
-        await manager.close_tab()
-        return [TextContent(type="text", text="Tab closed")]
-
-    return [TextContent(type="text", text=f"Unknown tool: {name}")]
+# === Formatting helpers ===
 
 
 def _format_started(label: str, result: dict[str, Any]) -> str:
@@ -1130,8 +665,8 @@ def _format_profile(profile: dict[str, Any], uuid: str) -> str:
         lines.append(f"\nExtensions ({len(extensions)}):")
         for ext in extensions:
             if isinstance(ext, dict):
-                ext_name = ext.get("name", ext.get("title", "N/A"))
-                lines.append(f"  - {ext_name} {ext.get('version', '')}".rstrip())
+                name = ext.get("name", ext.get("title", "N/A"))
+                lines.append(f"  - {name} {ext.get('version', '')}".rstrip())
             else:
                 lines.append(f"  - {ext}")
 
@@ -1141,23 +676,17 @@ def _format_profile(profile: dict[str, Any], uuid: str) -> str:
 def _setup_logging() -> None:
     """Log to stderr -- stdout carries the MCP protocol."""
     logging.basicConfig(
-        level=os.getenv("OCTO_LOG_LEVEL", "WARNING").upper(),
+        level=_log_level(),
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
 
-async def run_server() -> None:
-    """Run the MCP server over stdio."""
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
 def main() -> None:
     """Entry point."""
     _setup_logging()
-    logger.info("Starting octo-mcp (host=%s:%s)", OCTO_HOST, OCTO_PORT)
-    asyncio.run(run_server())
+    logger.info("Starting octo-mcp %s (host=%s:%s)", __version__, OCTO_HOST, OCTO_PORT)
+    server.run("stdio")
 
 
 if __name__ == "__main__":
