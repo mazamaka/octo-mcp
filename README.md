@@ -4,13 +4,14 @@
 
 **Control antidetect browser profiles with AI through the Model Context Protocol**
 
+[![CI](https://github.com/mazamaka/octo-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mazamaka/octo-mcp/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-8A2BE2.svg?logo=anthropic&logoColor=white)](https://modelcontextprotocol.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Octo Browser](https://img.shields.io/badge/Octo_Browser-API-FF6B35.svg)](https://octobrowser.net/)
 [![Playwright](https://img.shields.io/badge/Playwright-CDP-2EAD33.svg?logo=playwright&logoColor=white)](https://playwright.dev/)
 
-[Installation](#installation) · [Quick Start](#quick-start) · [Tools Reference](#tools-reference-34-tools) · [Examples](#usage-examples) · [Architecture](#architecture)
+[Installation](#installation) · [Quick Start](#quick-start) · [Tools Reference](#tools-reference-37-tools) · [Examples](#usage-examples) · [Architecture](#architecture)
 
 </div>
 
@@ -34,7 +35,7 @@ The AI handles the rest -- finding the profile, launching it, connecting via CDP
 - **One-Time Profiles** -- Temporary profiles that self-destruct after use (ideal for scraping)
 - **Multi-Tab Control** -- Open, switch, and close browser tabs programmatically
 - **Remote/Docker Ready** -- Automatic WebSocket URL rewriting for non-localhost setups
-- **Rate Limit Handling** -- Built-in retry with exponential backoff for API throttling
+- **Rate Limit Handling** -- Bounded retries that honour the `Retry-After` header on HTTP 429
 
 ## Architecture
 
@@ -48,7 +49,7 @@ The AI handles the rest -- finding the profile, launching it, connecting via CDP
 │              octo-mcp Server                         │
 │  ┌─────────────┐ ┌──────────────┐ ┌──────────────┐  │
 │  │   server.py  │ │ octo_client  │ │browser_manager│ │
-│  │  34 MCP Tools│ │  Local+Cloud │ │  Playwright   │ │
+│  │  37 MCP Tools│ │  Local+Cloud │ │  Playwright   │ │
 │  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘  │
 └─────────┼────────────────┼────────────────┼──────────┘
           │                │                │
@@ -130,7 +131,7 @@ Ask Claude: *"Check if Octo Browser is running"* -- it will use `octo_health_che
 2. Go to **Settings** → **API**
 3. Copy your API token
 
-> The API token is only needed for Cloud API operations (searching profiles by name, managing tags/proxies/extensions). Basic profile start/stop works without it.
+> The API token is only needed for Cloud API operations (searching profiles by name, managing tags/proxies/extensions) and those also require an active Octo subscription. Basic profile start/stop through the Local API works without either.
 
 ## Environment Variables
 
@@ -141,8 +142,10 @@ Ask Claude: *"Check if Octo Browser is running"* -- it will use `octo_health_che
 | `OCTO_USERNAME` | Account email for auto-login | -- |
 | `OCTO_PASSWORD` | Account password for auto-login | -- |
 | `OCTO_API_TOKEN` | Cloud API token (for search, tags, proxies) | -- |
+| `OCTO_API_URL` | Cloud API base URL -- set it to a [mirror](https://documenter.getpostman.com/view/1801428/UVC6i6eA) if your provider blocks the main host | `https://app.octobrowser.net/api/v2/automation` |
+| `OCTO_LOG_LEVEL` | Server log level (`DEBUG`, `INFO`, `WARNING`, ...); logs go to stderr | `WARNING` |
 
-## Tools Reference (34 tools)
+## Tools Reference (37 tools)
 
 ### Profile Management (Local API)
 
@@ -150,7 +153,7 @@ Ask Claude: *"Check if Octo Browser is running"* -- it will use `octo_health_che
 |------|-------------|
 | `octo_health_check` | Check Octo Browser API availability and version |
 | `octo_list_profiles` | List all active (running) profiles with their WebSocket endpoints |
-| `octo_start_profile` | Start a profile by UUID; returns `ws_endpoint` for CDP connection |
+| `octo_start_profile` | Start a profile by UUID; returns `ws_endpoint` for CDP connection. Accepts a profile `password` |
 | `octo_stop_profile` | Gracefully or forcefully stop a running profile |
 | `octo_start_one_time_profile` | Create a temporary profile (auto-deleted on stop); supports OS selection |
 
@@ -158,9 +161,9 @@ Ask Claude: *"Check if Octo Browser is running"* -- it will use `octo_health_che
 
 | Tool | Description |
 |------|-------------|
-| `octo_find_profile_by_name` | Find a profile by exact or partial name match |
-| `octo_start_profile_by_name` | Find profile by name and start it (combines find + start) |
-| `octo_search_profiles` | Search profiles by name, tags, status; supports sorting and pagination |
+| `octo_find_profile_by_name` | Find a profile by title (the API matches from the start of the title) |
+| `octo_start_profile_by_name` | Find profile by title and start it (combines find + start) |
+| `octo_search_profiles` | Search profiles by title prefix, tags, status; supports sorting and pagination |
 | `octo_get_profile` | Get full profile data: fingerprint, proxy, extensions, tags |
 
 ### Team Resources (Cloud API)
@@ -328,26 +331,30 @@ The server automatically rewrites WebSocket URLs from `127.0.0.1`/`localhost` to
 |---------|----------|
 | "Octo Browser API unavailable" | Make sure Octo Browser is running. The Local API starts with the app. |
 | "OCTO_API_TOKEN is not set" | Add your API token or use `octo_start_profile` with UUID directly. |
-| "Profile not found" | Profile names are case-sensitive. Use `octo_search_profiles` to browse. |
+| "Cloud API access denied: No active subscription" | Cloud API calls need an active Octo subscription. Local profile start/stop keeps working without one. |
+| "Rate limit not cleared after 5 retries" | Limits are shared across the team (50-200 RPM by plan). Slow down or upgrade the plan. |
+| "Profile not found" | Titles are case-sensitive and matched from the start of the title. Use `octo_search_profiles` to browse. |
 | WebSocket connection fails | Check that OCTO_HOST is correct and CDP ports are accessible. |
 | "Browser not connected" | Call `browser_connect` with the `ws_endpoint` from profile start. |
+
+Set `OCTO_LOG_LEVEL=DEBUG` to see every API request on stderr.
 
 ## Development
 
 ```bash
 git clone https://github.com/mazamaka/octo-mcp.git
 cd octo-mcp
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev          # or: python -m venv .venv && pip install -e ".[dev]"
 
-# Lint & format
-ruff check src/
-ruff format src/
-
-# Run tests
-pytest
+uv run ruff check src/ tests/
+uv run ruff format src/ tests/
+uv run mypy src/ tests/
+uv run pytest
 ```
+
+The test suite serves every Octo API response through `httpx.MockTransport`, so it
+needs neither a running Octo Browser nor network access. The same three checks run
+in CI on Python 3.10 and 3.13.
 
 ## Tech Stack
 
@@ -367,6 +374,7 @@ MIT License -- see [LICENSE](LICENSE) for details.
 ## Links
 
 - [Octo Browser](https://octobrowser.net/) -- Antidetect browser for multi-accounting
-- [Octo Browser API Docs](https://docs.octobrowser.net/)
+- [Octo Browser API reference](https://documenter.getpostman.com/view/1801428/UVC6i6eA) -- the Postman collection this client is built against
+- [Octo Browser Docs](https://docs.octobrowser.net/)
 - [Model Context Protocol](https://modelcontextprotocol.io/) -- Open protocol for AI-tool integration
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)

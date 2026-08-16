@@ -109,12 +109,19 @@ class BrowserManager:
 
     # === Navigation ===
 
-    async def navigate(self, url: str, wait_until: str = "domcontentloaded") -> None:
+    async def navigate(
+        self,
+        url: str,
+        wait_until: Literal["commit", "domcontentloaded", "load", "networkidle"] = (
+            "domcontentloaded"
+        ),
+    ) -> None:
         """Navigate to a URL.
 
         Args:
             url: Target URL.
-            wait_until: Wait strategy -- 'load', 'domcontentloaded', or 'networkidle'.
+            wait_until: Wait strategy -- 'load', 'domcontentloaded', 'networkidle'
+                or 'commit'.
         """
         page = await self._get_page()
         await page.goto(url, wait_until=wait_until)
@@ -228,11 +235,15 @@ class BrowserManager:
 
         if selector:
             element = await page.query_selector(selector)
-            if element:
-                await element.scroll_into_view_if_needed()
-                box = await element.bounding_box()
-                if box:
-                    await page.mouse.wheel(delta_x, delta_y)
+            if element is None:
+                raise ValueError(f"Element not found: {selector}")
+            # The wheel event goes to whatever is under the cursor, so move the
+            # mouse onto the element first -- otherwise the page scrolls instead.
+            await element.scroll_into_view_if_needed()
+            box = await element.bounding_box()
+            if box:
+                await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            await page.mouse.wheel(delta_x, delta_y)
         else:
             await page.mouse.wheel(delta_x, delta_y)
 
@@ -316,7 +327,7 @@ class BrowserManager:
             element = await page.query_selector(selector)
             if element:
                 if outer:
-                    return await element.evaluate("el => el.outerHTML")
+                    return str(await element.evaluate("el => el.outerHTML"))
                 return await element.inner_html()
             raise ValueError(f"Element not found: {selector}")
 
