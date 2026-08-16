@@ -20,6 +20,8 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
+          # both matrix jobs run in parallel and would race for one cache key
+          cache-suffix: py${{ matrix.python-version }}
 
       - name: Install
         run: uv sync --extra dev --python ${{ matrix.python-version }}
